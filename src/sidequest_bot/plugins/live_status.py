@@ -1,16 +1,17 @@
 """Live voice-channel/presence status for the homepage "In the Discord" band.
 
 Every 60 s: refresh the guild's approximate online/member counts (``fetch_guild(..., with_counts=True)``) and the
-per-channel voice counts visible to the guild's audience role (the linked "Signed the Ledger" role if configured
-and still present in the guild, otherwise ``@everyone``), then push a full report. ``on_voice_state_update`` also
-pushes, debounced ~5 s per guild so a burst of joins/leaves (e.g. everyone piling into one channel) coalesces into
-a single push; mute/deafen toggles (channel unchanged) are ignored entirely. See ``local://discord-live-contract.md``
-for the wire contract; the API decides what the website shows, this cog only reports what Discord currently looks
-like.
+per-channel voice counts visible to the guild's audience role (the roster role if configured and present, else the
+linked "Signed the Ledger" role if configured and present, else ``@everyone``), then push a full report.
+``on_voice_state_update`` also pushes, debounced ~5 s per guild so a burst of joins/leaves (e.g. everyone piling
+into one channel) coalesces into a single push; mute/deafen toggles (channel unchanged) are ignored entirely. See
+``local://discord-live-contract.md`` for the wire contract; the API decides what the website shows, this cog only
+reports what Discord currently looks like.
 """
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 import discord
 from discord.ext import commands, tasks
@@ -18,6 +19,9 @@ from discord.ext import commands, tasks
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_common.schemas import DiscordLiveReport, VoiceChannelCount
+
+if TYPE_CHECKING:
+    from sidequest_common.schemas import GuildConfigSchema
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,14 @@ class LiveStatusCog(commands.Cog):
             self._last_members[guild.id] = fetched.approximate_member_count
         await self._push(guild)
 
+    @staticmethod
+    def _resolve_audience_role(guild: discord.Guild, config: GuildConfigSchema) -> discord.Role | None:
+        """The roster role if configured and present, else the linked role if configured and present, else None."""
+        for role_id in (config.roster_role_id, config.linked_role_id):
+            if role_id is not None and (role := guild.get_role(role_id)) is not None:
+                return role
+        return None
+
     async def _push(self, guild: discord.Guild) -> None:
         """Report the current voice counts plus the last known online/member counts."""
         audience = guild.default_role
@@ -97,8 +109,7 @@ class LiveStatusCog(commands.Cog):
                 exc_info=True,
             )
         else:
-            if config.linked_role_id is not None and (role := guild.get_role(config.linked_role_id)) is not None:
-                audience = role
+            audience = self._resolve_audience_role(guild, config) or audience
         report = DiscordLiveReport(
             online=self._last_online.get(guild.id),
             members=self._last_members.get(guild.id),

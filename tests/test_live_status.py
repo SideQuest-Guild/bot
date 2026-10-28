@@ -59,9 +59,9 @@ def _fake_guild(
     return guild
 
 
-def _configs(*, linked_role_id: int | None = None) -> AsyncMock:
+def _configs(*, linked_role_id: int | None = None, roster_role_id: int | None = None) -> AsyncMock:
     configs = AsyncMock()
-    configs.get.return_value = SimpleNamespace(linked_role_id=linked_role_id)
+    configs.get.return_value = SimpleNamespace(linked_role_id=linked_role_id, roster_role_id=roster_role_id)
     return configs
 
 
@@ -256,6 +256,37 @@ class TestPushAudience:
 
         mocked.assert_called_once_with(guild, guild.default_role)
         api.report_discord_live.assert_awaited_once()
+
+    async def test_prefers_roster_role_over_linked_role_when_both_present(self) -> None:
+        roster_role = MagicMock(spec=discord.Role)
+        linked_role = MagicMock(spec=discord.Role)
+        guild = _fake_guild()
+        guild.get_role.side_effect = {100: roster_role, 200: linked_role}.get
+        api = AsyncMock()
+        bot = SimpleNamespace(
+            api=api, configs=_configs(linked_role_id=200, roster_role_id=100), guilds=[guild], fetch_guild=AsyncMock()
+        )
+        cog = _make_cog(api=api, bot=bot)
+
+        with patch.object(live_status, "build_voice_counts", return_value=[]) as mocked:
+            await cog._push(guild)
+
+        mocked.assert_called_once_with(guild, roster_role)
+
+    async def test_falls_back_to_linked_role_when_roster_role_not_in_guild(self) -> None:
+        linked_role = MagicMock(spec=discord.Role)
+        guild = _fake_guild()
+        guild.get_role.side_effect = {200: linked_role}.get
+        api = AsyncMock()
+        bot = SimpleNamespace(
+            api=api, configs=_configs(linked_role_id=200, roster_role_id=999), guilds=[guild], fetch_guild=AsyncMock()
+        )
+        cog = _make_cog(api=api, bot=bot)
+
+        with patch.object(live_status, "build_voice_counts", return_value=[]) as mocked:
+            await cog._push(guild)
+
+        mocked.assert_called_once_with(guild, linked_role)
 
 
 class TestVoiceStateListener:

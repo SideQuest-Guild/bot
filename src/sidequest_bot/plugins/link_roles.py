@@ -1,12 +1,14 @@
-"""Site sign-in and Battle.net link roles, the gate role, plus the ``/linkroles`` admin group.
+"""Site sign-in, Battle.net link, and roster-confirmation roles, the gate role, plus the ``/linkroles`` admin group.
 
-Every 60 s: for each guild with any of the three roles configured, pull who has signed in and who has also linked
-Battle.net from the API, and reconcile every member's roles against that. The gate role (**At the Gate**) is wanted
-exactly while a member has NOT signed in: new members get it on join so they only see the sign-in channel, and it's
-removed the moment they sign in. ``on_member_join``/screening-clear apply the same plan immediately so a new member
-doesn't wait up to a minute for their role. The bot is the only thing that talks to Discord about these roles; the
-API only reports who is linked. See ``local://link-roles-contract.md`` (read at implementation time) for the full
-wire contract.
+Every 60 s: for each guild with any of the four roles configured, pull who has signed in, who has also linked
+Battle.net, and who an officer has confirmed on the in-game guild roster from the API, and reconcile every member's
+roles against that. The gate role (**At the Gate**) is wanted exactly while a member has NOT signed in: new members
+get it on join so they only see the sign-in channel, and it's removed the moment they sign in. The roster role
+(**New Arrival**) is wanted once an officer confirms the member, but is never re-granted to a member who already
+holds a higher rank. ``on_member_join``/screening-clear apply the same plan immediately so a new member doesn't
+wait up to a minute for their role. The bot is the only thing that talks to Discord about these roles; the API
+only reports who is linked/confirmed. See ``local://link-roles-contract.md`` (read at implementation time) for the
+full wire contract.
 """
 
 import logging
@@ -31,6 +33,25 @@ logger = logging.getLogger(__name__)
 SYNC_INTERVAL_SECONDS = 60
 
 
+def _plan_role(
+    role_id: int | None,
+    member_role_ids: set[int],
+    to_add: list[int],
+    to_remove: list[int],
+    *,
+    wants_role: bool,
+    blocked: bool = False,
+) -> None:
+    """Append ``role_id`` to ``to_add``/``to_remove`` if it's configured and its wanted state doesn't match."""
+    if role_id is None:
+        return
+    has_role = role_id in member_role_ids
+    if wants_role and not has_role and not blocked:
+        to_add.append(role_id)
+    elif not wants_role and has_role:
+        to_remove.append(role_id)
+
+
 def plan_role_changes(
     member_role_ids: set[int],
     *,
@@ -39,36 +60,33 @@ def plan_role_changes(
     linked_role_id: int | None,
     battlenet_role_id: int | None,
     gate_role_id: int | None,
+    roster_role_id: int | None = None,
+    roster_confirmed: bool = False,
+    ranked_above_roster_role: bool = False,
 ) -> tuple[list[int], list[int]]:
-    """Which of the three configured roles to add/remove for one member.
+    """Which of the four configured roles to add/remove for one member.
 
-    Only ever touches ``linked_role_id``/``battlenet_role_id``/``gate_role_id`` (a ``None`` id is skipped entirely):
-    the site role tracks ``linked``, the Battle.net role additionally requires ``battlenet_linked`` (so unlinking
-    Battle.net drops just that role, and unlinking the site account drops both), and the gate role is wanted
-    exactly when the member is NOT linked (added once they join unlinked, removed once they sign in).
+    Only ever touches ``linked_role_id``/``battlenet_role_id``/``gate_role_id``/``roster_role_id`` (a ``None`` id
+    is skipped entirely): the site role tracks ``linked``, the Battle.net role additionally requires
+    ``battlenet_linked`` (so unlinking Battle.net drops just that role, and unlinking the site account drops both),
+    the gate role is wanted exactly when the member is NOT linked (added once they join unlinked, removed once
+    they sign in), and the roster role is wanted once an officer confirms the member on the in-game guild roster
+    but is never (re-)granted to a member who ``ranked_above_roster_role`` already holds a higher rank (a promoted
+    member who dropped the role must not get it back every minute).
     """
     to_add: list[int] = []
     to_remove: list[int] = []
-    if linked_role_id is not None:
-        has_role = linked_role_id in member_role_ids
-        if linked and not has_role:
-            to_add.append(linked_role_id)
-        elif not linked and has_role:
-            to_remove.append(linked_role_id)
-    if battlenet_role_id is not None:
-        wants_role = linked and battlenet_linked
-        has_role = battlenet_role_id in member_role_ids
-        if wants_role and not has_role:
-            to_add.append(battlenet_role_id)
-        elif not wants_role and has_role:
-            to_remove.append(battlenet_role_id)
-    if gate_role_id is not None:
-        wants_role = not linked
-        has_role = gate_role_id in member_role_ids
-        if wants_role and not has_role:
-            to_add.append(gate_role_id)
-        elif not wants_role and has_role:
-            to_remove.append(gate_role_id)
+    _plan_role(linked_role_id, member_role_ids, to_add, to_remove, wants_role=linked)
+    _plan_role(battlenet_role_id, member_role_ids, to_add, to_remove, wants_role=linked and battlenet_linked)
+    _plan_role(gate_role_id, member_role_ids, to_add, to_remove, wants_role=not linked)
+    _plan_role(
+        roster_role_id,
+        member_role_ids,
+        to_add,
+        to_remove,
+        wants_role=linked and roster_confirmed,
+        blocked=ranked_above_roster_role,
+    )
     return to_add, to_remove
 
 
@@ -77,7 +95,10 @@ class LinkRolesCog(commands.Cog):
 
     linkroles_group = app_commands.Group(
         name="linkroles",
-        description="Configure the roles granted for signing in on the site, linking Battle.net, and the gate role.",
+        description=(
+            "Configure the roles granted for signing in on the site, linking Battle.net, the gate role, and "
+            "roster confirmation."
+        ),
         guild_only=True,
         default_permissions=discord.Permissions(manage_guild=True),
     )
@@ -115,27 +136,44 @@ class LinkRolesCog(commands.Cog):
 
     async def _sync_guild(self, guild: discord.Guild) -> None:
         config = await self.bot.configs.get(guild.id)
-        if config.linked_role_id is None and config.battlenet_role_id is None and config.gate_role_id is None:
+        if (
+            config.linked_role_id is None
+            and config.battlenet_role_id is None
+            and config.gate_role_id is None
+            and config.roster_role_id is None
+        ):
             return
-        battlenet_by_discord_id = await self._fetch_links(guild.id)
+        links_by_discord_id = await self._fetch_links(guild.id)
         for member in guild.members:
             if member.bot:
                 continue
-            await self._apply_member(guild, member, config, battlenet_by_discord_id)
+            await self._apply_member(guild, member, config, links_by_discord_id)
 
-    async def _fetch_links(self, guild_id: int) -> dict[int, bool]:
+    async def _fetch_links(self, guild_id: int) -> dict[int, MemberLink]:
         links: list[MemberLink] = await self.bot.api.list_member_links(guild_id)
-        return {link.discord_id: link.battlenet_linked for link in links}
+        return {link.discord_id: link for link in links}
+
+    @staticmethod
+    def _ranked_above_roster_role(guild: discord.Guild, roster_role_id: int | None, member: discord.Member) -> bool:
+        """Whether ``member`` holds some non-managed role positioned above the roster role. False if unconfigured."""
+        if roster_role_id is None:
+            return False
+        roster_role = guild.get_role(roster_role_id)
+        if roster_role is None:
+            return False
+        return any(not role.managed and role.position > roster_role.position for role in member.roles)
 
     async def _apply_member(
         self,
         guild: discord.Guild,
         member: discord.Member,
         config: GuildConfigSchema,
-        battlenet_by_discord_id: dict[int, bool],
+        links_by_discord_id: dict[int, MemberLink],
     ) -> None:
-        linked = member.id in battlenet_by_discord_id
-        battlenet_linked = battlenet_by_discord_id.get(member.id, False)
+        link = links_by_discord_id.get(member.id)
+        linked = link is not None
+        battlenet_linked = link.battlenet_linked if link is not None else False
+        roster_confirmed = link.roster_confirmed if link is not None else False
         member_role_ids = {role.id for role in member.roles}
         to_add, to_remove = plan_role_changes(
             member_role_ids,
@@ -144,6 +182,9 @@ class LinkRolesCog(commands.Cog):
             linked_role_id=config.linked_role_id,
             battlenet_role_id=config.battlenet_role_id,
             gate_role_id=config.gate_role_id,
+            roster_role_id=config.roster_role_id,
+            roster_confirmed=roster_confirmed,
+            ranked_above_roster_role=self._ranked_above_roster_role(guild, config.roster_role_id, member),
         )
         if not to_add and not to_remove:
             return
@@ -154,6 +195,8 @@ class LinkRolesCog(commands.Cog):
                 reason = "Signed in on sidequest-guild.com"
             elif role_id == config.battlenet_role_id:
                 reason = "Linked Battle.net"
+            elif role_id == config.roster_role_id:
+                reason = "Confirmed on the guild roster"
             else:
                 reason = "Hasn't signed in on sidequest-guild.com yet"
             try:
@@ -208,16 +251,21 @@ class LinkRolesCog(commands.Cog):
             return
         try:
             config = await self.bot.configs.get(guild.id)
-            if config.linked_role_id is None and config.battlenet_role_id is None and config.gate_role_id is None:
+            if (
+                config.linked_role_id is None
+                and config.battlenet_role_id is None
+                and config.gate_role_id is None
+                and config.roster_role_id is None
+            ):
                 return
-            battlenet_by_discord_id = await self._fetch_links(guild.id)
+            links_by_discord_id = await self._fetch_links(guild.id)
         except NotFoundError:
             self._not_site_guild_ids.add(guild.id)
             return
         except APIError:
             logger.warning("Link role sync failed for %s in guild %s", member.id, guild.id, exc_info=True)
             return
-        await self._apply_member(guild, member, config, battlenet_by_discord_id)
+        await self._apply_member(guild, member, config, links_by_discord_id)
 
     # --- /linkroles group ---------------------------------------------------------------------------------------
 
@@ -275,6 +323,26 @@ class LinkRolesCog(commands.Cog):
                 return
         await interaction.client.configs.update(guild.id, GuildConfigUpdate(gate_role_id=role.id if role else None))
         message = f"New members will get {role.mention} until they sign in." if role else "Gate role disabled."
+        await interaction.response.send_message(message, ephemeral=True)
+
+    @linkroles_group.command(
+        name="roster", description="Set (or clear) the role granted once an officer confirms the member on the roster."
+    )
+    @app_commands.describe(role="Role to grant on roster confirmation; omit to disable.")
+    async def linkroles_roster(
+        self, interaction: discord.Interaction[SideQuestBot], role: discord.Role | None = None
+    ) -> None:
+        """Update ``roster_role_id`` after checking the invoker may configure it and the bot may grant it."""
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        if role is not None:
+            reason = autorole_block_reason(interaction.user, role)
+            if reason is not None:
+                await interaction.response.send_message(reason, ephemeral=True)
+                return
+        await interaction.client.configs.update(guild.id, GuildConfigUpdate(roster_role_id=role.id if role else None))
+        message = f"Confirmed guild members will get {role.mention}." if role else "Roster role disabled."
         await interaction.response.send_message(message, ephemeral=True)
 
 

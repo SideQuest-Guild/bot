@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import discord
 import pytest
+from pydantic import ValidationError
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.plugins import link_roles as link_roles_module
@@ -234,10 +235,23 @@ class TestSyncLoop:
         assert guild.id in cog._not_site_guild_ids
         assert configs.get.await_count == 1
 
-    async def test_other_api_errors_do_not_crash_the_loop(self) -> None:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            APIError(500, "boom"),
+            # What production hit during a rolling deploy: the bot updated before the API, whose config response
+            # didn't match the bot's schema yet. Escaping here stops the tasks.loop for good.
+            pytest.param(lambda: MemberLink.model_validate({}), id="response-shape-mismatch"),
+        ],
+    )
+    async def test_failed_fetch_does_not_crash_the_loop(self, error: object) -> None:
+        if callable(error):
+            with pytest.raises(ValidationError) as excinfo:
+                error()
+            error = excinfo.value
         guild = _fake_guild()
         configs = AsyncMock()
-        configs.get.side_effect = APIError(500, "boom")
+        configs.get.side_effect = error
         cog = _make_cog(configs=configs, guilds=[guild])
 
         await cog._sync_loop.coro(cog)  # must not raise

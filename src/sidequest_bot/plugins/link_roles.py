@@ -1,10 +1,12 @@
-"""Site sign-in and Battle.net link roles, plus the ``/linkroles`` admin group.
+"""Site sign-in and Battle.net link roles, the gate role, plus the ``/linkroles`` admin group.
 
-Every 60 s: for each guild with either role configured, pull who has signed in and who has also linked Battle.net
-from the API, and reconcile every member's roles against that. ``on_member_join``/screening-clear apply the same
-plan immediately so a new member doesn't wait up to a minute for their role. The bot is the only thing that talks
-to Discord about these roles; the API only reports who is linked. See ``local://link-roles-contract.md`` (read at
-implementation time) for the full wire contract.
+Every 60 s: for each guild with any of the three roles configured, pull who has signed in and who has also linked
+Battle.net from the API, and reconcile every member's roles against that. The gate role (**At the Gate**) is wanted
+exactly while a member has NOT signed in: new members get it on join so they only see the sign-in channel, and it's
+removed the moment they sign in. ``on_member_join``/screening-clear apply the same plan immediately so a new member
+doesn't wait up to a minute for their role. The bot is the only thing that talks to Discord about these roles; the
+API only reports who is linked. See ``local://link-roles-contract.md`` (read at implementation time) for the full
+wire contract.
 """
 
 import logging
@@ -36,12 +38,14 @@ def plan_role_changes(
     battlenet_linked: bool,
     linked_role_id: int | None,
     battlenet_role_id: int | None,
+    gate_role_id: int | None,
 ) -> tuple[list[int], list[int]]:
-    """Which of the two configured roles to add/remove for one member.
+    """Which of the three configured roles to add/remove for one member.
 
-    Only ever touches ``linked_role_id``/``battlenet_role_id`` (a ``None`` id is skipped entirely): the site role
-    tracks ``linked``, the Battle.net role additionally requires ``battlenet_linked`` (so unlinking Battle.net drops
-    just that role, and unlinking the site account drops both).
+    Only ever touches ``linked_role_id``/``battlenet_role_id``/``gate_role_id`` (a ``None`` id is skipped entirely):
+    the site role tracks ``linked``, the Battle.net role additionally requires ``battlenet_linked`` (so unlinking
+    Battle.net drops just that role, and unlinking the site account drops both), and the gate role is wanted
+    exactly when the member is NOT linked (added once they join unlinked, removed once they sign in).
     """
     to_add: list[int] = []
     to_remove: list[int] = []
@@ -58,6 +62,13 @@ def plan_role_changes(
             to_add.append(battlenet_role_id)
         elif not wants_role and has_role:
             to_remove.append(battlenet_role_id)
+    if gate_role_id is not None:
+        wants_role = not linked
+        has_role = gate_role_id in member_role_ids
+        if wants_role and not has_role:
+            to_add.append(gate_role_id)
+        elif not wants_role and has_role:
+            to_remove.append(gate_role_id)
     return to_add, to_remove
 
 
@@ -66,7 +77,7 @@ class LinkRolesCog(commands.Cog):
 
     linkroles_group = app_commands.Group(
         name="linkroles",
-        description="Configure the roles granted for signing in on the site and linking Battle.net.",
+        description="Configure the roles granted for signing in on the site, linking Battle.net, and the gate role.",
         guild_only=True,
         default_permissions=discord.Permissions(manage_guild=True),
     )
@@ -104,7 +115,7 @@ class LinkRolesCog(commands.Cog):
 
     async def _sync_guild(self, guild: discord.Guild) -> None:
         config = await self.bot.configs.get(guild.id)
-        if config.linked_role_id is None and config.battlenet_role_id is None:
+        if config.linked_role_id is None and config.battlenet_role_id is None and config.gate_role_id is None:
             return
         battlenet_by_discord_id = await self._fetch_links(guild.id)
         for member in guild.members:
@@ -132,13 +143,19 @@ class LinkRolesCog(commands.Cog):
             battlenet_linked=battlenet_linked,
             linked_role_id=config.linked_role_id,
             battlenet_role_id=config.battlenet_role_id,
+            gate_role_id=config.gate_role_id,
         )
         if not to_add and not to_remove:
             return
         for role_id in to_add:
             if (role := self._resolve_grantable_role(guild, role_id)) is None:
                 continue
-            reason = "Signed in on sidequest-guild.com" if role_id == config.linked_role_id else "Linked Battle.net"
+            if role_id == config.linked_role_id:
+                reason = "Signed in on sidequest-guild.com"
+            elif role_id == config.battlenet_role_id:
+                reason = "Linked Battle.net"
+            else:
+                reason = "Hasn't signed in on sidequest-guild.com yet"
             try:
                 await member.add_roles(role, reason=reason)
             except discord.HTTPException:
@@ -148,7 +165,7 @@ class LinkRolesCog(commands.Cog):
         remove_roles = [role for role_id in to_remove if (role := guild.get_role(role_id)) is not None]
         if remove_roles:
             try:
-                await member.remove_roles(*remove_roles, reason="Unlinked")
+                await member.remove_roles(*remove_roles, reason="Link roles sync")
             except discord.HTTPException:
                 logger.warning("Failed to remove link role(s) from %s in guild %s", member.id, guild.id, exc_info=True)
 
@@ -191,7 +208,7 @@ class LinkRolesCog(commands.Cog):
             return
         try:
             config = await self.bot.configs.get(guild.id)
-            if config.linked_role_id is None and config.battlenet_role_id is None:
+            if config.linked_role_id is None and config.battlenet_role_id is None and config.gate_role_id is None:
                 return
             battlenet_by_discord_id = await self._fetch_links(guild.id)
         except NotFoundError:
@@ -240,6 +257,24 @@ class LinkRolesCog(commands.Cog):
             guild.id, GuildConfigUpdate(battlenet_role_id=role.id if role else None)
         )
         message = f"Members who link Battle.net will get {role.mention}." if role else "Battle.net link role disabled."
+        await interaction.response.send_message(message, ephemeral=True)
+
+    @linkroles_group.command(name="gate", description="Set (or clear) the role new members get until they sign in.")
+    @app_commands.describe(role="Role to grant on join and remove on sign-in; omit to disable.")
+    async def linkroles_gate(
+        self, interaction: discord.Interaction[SideQuestBot], role: discord.Role | None = None
+    ) -> None:
+        """Update ``gate_role_id`` after checking the invoker may configure it and the bot may grant it."""
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        if role is not None:
+            reason = autorole_block_reason(interaction.user, role)
+            if reason is not None:
+                await interaction.response.send_message(reason, ephemeral=True)
+                return
+        await interaction.client.configs.update(guild.id, GuildConfigUpdate(gate_role_id=role.id if role else None))
+        message = f"New members will get {role.mention} until they sign in." if role else "Gate role disabled."
         await interaction.response.send_message(message, ephemeral=True)
 
 

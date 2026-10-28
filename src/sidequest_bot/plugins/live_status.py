@@ -1,10 +1,12 @@
 """Live voice-channel/presence status for the homepage "In the Discord" band.
 
 Every 60 s: refresh the guild's approximate online/member counts (``fetch_guild(..., with_counts=True)``) and the
-per-channel voice counts, then push a full report. ``on_voice_state_update`` also pushes, debounced ~5 s per guild
-so a burst of joins/leaves (e.g. everyone piling into one channel) coalesces into a single push; mute/deafen
-toggles (channel unchanged) are ignored entirely. See ``local://discord-live-contract.md`` for the wire contract;
-the API decides what the website shows, this cog only reports what Discord currently looks like.
+per-channel voice counts visible to the guild's audience role (the linked "Signed the Ledger" role if configured
+and still present in the guild, otherwise ``@everyone``), then push a full report. ``on_voice_state_update`` also
+pushes, debounced ~5 s per guild so a burst of joins/leaves (e.g. everyone piling into one channel) coalesces into
+a single push; mute/deafen toggles (channel unchanged) are ignored entirely. See ``local://discord-live-contract.md``
+for the wire contract; the API decides what the website shows, this cog only reports what Discord currently looks
+like.
 """
 
 import asyncio
@@ -23,12 +25,12 @@ REPORT_INTERVAL_SECONDS = 60
 DEBOUNCE_SECONDS = 5
 
 
-def build_voice_counts(guild: discord.Guild) -> list[VoiceChannelCount]:
-    """Every voice/stage channel ``@everyone`` can view, in Discord's displayed order, zero counts included."""
+def build_voice_counts(guild: discord.Guild, audience: discord.Role) -> list[VoiceChannelCount]:
+    """Every voice/stage channel ``audience`` can view, in Discord's displayed order, zero counts included."""
     channels = [
         channel
         for channel in (*guild.voice_channels, *guild.stage_channels)
-        if channel.permissions_for(guild.default_role).view_channel
+        if channel.permissions_for(audience).view_channel
     ]
     channels.sort(
         key=lambda channel: (
@@ -85,10 +87,22 @@ class LiveStatusCog(commands.Cog):
 
     async def _push(self, guild: discord.Guild) -> None:
         """Report the current voice counts plus the last known online/member counts."""
+        audience = guild.default_role
+        try:
+            config = await self.bot.configs.get(guild.id)
+        except APIError:
+            logger.warning(
+                "Failed to load guild config for %s; using @everyone as the voice-count audience",
+                guild.id,
+                exc_info=True,
+            )
+        else:
+            if config.linked_role_id is not None and (role := guild.get_role(config.linked_role_id)) is not None:
+                audience = role
         report = DiscordLiveReport(
             online=self._last_online.get(guild.id),
             members=self._last_members.get(guild.id),
-            voice=build_voice_counts(guild),
+            voice=build_voice_counts(guild, audience),
         )
         try:
             await self.bot.api.report_discord_live(guild.id, report)

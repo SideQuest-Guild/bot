@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
@@ -27,13 +27,17 @@ def _fake_voice_channel(
     category: MagicMock | None = None,
     hidden: bool = False,
     members: list[MagicMock] | None = None,
+    visible_to: set[object] | None = None,
 ) -> MagicMock:
     channel = MagicMock(spec=discord.VoiceChannel)
     channel.name = name
     channel.position = position
     channel.category = category
     channel.members = members or []
-    channel.permissions_for.return_value = SimpleNamespace(view_channel=not hidden)
+    if visible_to is not None:
+        channel.permissions_for.side_effect = lambda role: SimpleNamespace(view_channel=role in visible_to)
+    else:
+        channel.permissions_for.return_value = SimpleNamespace(view_channel=not hidden)
     return channel
 
 
@@ -51,12 +55,19 @@ def _fake_guild(
     guild.default_role = MagicMock(spec=discord.Role)
     guild.voice_channels = voice_channels or []
     guild.stage_channels = stage_channels or []
+    guild.get_role = MagicMock(return_value=None)
     return guild
+
+
+def _configs(*, linked_role_id: int | None = None) -> AsyncMock:
+    configs = AsyncMock()
+    configs.get.return_value = SimpleNamespace(linked_role_id=linked_role_id)
+    return configs
 
 
 def _make_cog(*, api: object, guilds: list[object] | None = None, bot: object | None = None) -> LiveStatusCog:
     cog = LiveStatusCog.__new__(LiveStatusCog)
-    cog.bot = bot or SimpleNamespace(api=api, guilds=guilds or [], fetch_guild=AsyncMock())
+    cog.bot = bot or SimpleNamespace(api=api, configs=_configs(), guilds=guilds or [], fetch_guild=AsyncMock())
     cog._not_site_guild_ids = set()
     cog._last_online = {}
     cog._last_members = {}
@@ -70,7 +81,7 @@ class TestBuildVoiceCounts:
         hidden = _fake_voice_channel(name="Secret", position=1, hidden=True)
         guild = _fake_guild(voice_channels=[visible, hidden])
 
-        result = build_voice_counts(guild)
+        result = build_voice_counts(guild, guild.default_role)
 
         assert [item.name for item in result] == ["Lobby"]
 
@@ -80,7 +91,7 @@ class TestBuildVoiceCounts:
         )
         guild = _fake_guild(voice_channels=[channel])
 
-        result = build_voice_counts(guild)
+        result = build_voice_counts(guild, guild.default_role)
 
         assert result == [VoiceChannelCount(name="Lobby", count=2)]
 
@@ -93,7 +104,7 @@ class TestBuildVoiceCounts:
         uncategorized = _fake_voice_channel(name="no-cat", position=0, category=None)
         guild = _fake_guild(voice_channels=[second_in_a, first_in_a, first_in_b, uncategorized])
 
-        result = build_voice_counts(guild)
+        result = build_voice_counts(guild, guild.default_role)
 
         assert [item.name for item in result] == ["no-cat", "first-a", "second-a", "first-b"]
 
@@ -101,7 +112,7 @@ class TestBuildVoiceCounts:
         channel = _fake_voice_channel(name="Empty", position=0, members=[])
         guild = _fake_guild(voice_channels=[channel])
 
-        result = build_voice_counts(guild)
+        result = build_voice_counts(guild, guild.default_role)
 
         assert result == [VoiceChannelCount(name="Empty", count=0)]
 
@@ -114,9 +125,28 @@ class TestBuildVoiceCounts:
         stage.permissions_for.return_value = SimpleNamespace(view_channel=True)
         guild = _fake_guild(stage_channels=[stage])
 
-        result = build_voice_counts(guild)
+        result = build_voice_counts(guild, guild.default_role)
 
         assert [item.name for item in result] == ["Stage"]
+
+    def test_counts_channel_hidden_from_everyone_but_visible_to_audience(self) -> None:
+        linked_role = MagicMock(spec=discord.Role)
+        everyone = MagicMock(spec=discord.Role)
+        site_only = _fake_voice_channel(name="Site Lounge", position=0, visible_to={linked_role})
+        guild = _fake_guild(voice_channels=[site_only])
+        guild.default_role = everyone
+
+        assert [item.name for item in build_voice_counts(guild, linked_role)] == ["Site Lounge"]
+        assert build_voice_counts(guild, everyone) == []
+
+    def test_excludes_channel_hidden_from_the_audience_role(self) -> None:
+        linked_role = MagicMock(spec=discord.Role)
+        officer_only = _fake_voice_channel(name="Officer Hall", position=0, visible_to=set())
+        guild = _fake_guild(voice_channels=[officer_only])
+
+        result = build_voice_counts(guild, linked_role)
+
+        assert result == []
 
 
 class TestReportLoop:
@@ -124,7 +154,7 @@ class TestReportLoop:
         guild = _fake_guild()
         api = AsyncMock()
         fetched = SimpleNamespace(approximate_presence_count=5, approximate_member_count=20)
-        bot = SimpleNamespace(api=api, guilds=[guild], fetch_guild=AsyncMock(return_value=fetched))
+        bot = SimpleNamespace(api=api, configs=_configs(), guilds=[guild], fetch_guild=AsyncMock(return_value=fetched))
         cog = _make_cog(api=api, bot=bot)
 
         await cog._report_loop.coro(cog)
@@ -135,7 +165,10 @@ class TestReportLoop:
         guild = _fake_guild()
         api = AsyncMock()
         bot = SimpleNamespace(
-            api=api, guilds=[guild], fetch_guild=AsyncMock(side_effect=discord.HTTPException(MagicMock(), "boom"))
+            api=api,
+            configs=_configs(),
+            guilds=[guild],
+            fetch_guild=AsyncMock(side_effect=discord.HTTPException(MagicMock(), "boom")),
         )
         cog = _make_cog(api=api, bot=bot)
         cog._last_online[guild.id] = 3
@@ -150,7 +183,7 @@ class TestReportLoop:
         api = AsyncMock()
         api.report_discord_live.side_effect = NotFoundError(404, "not the site guild")
         fetched = SimpleNamespace(approximate_presence_count=1, approximate_member_count=2)
-        bot = SimpleNamespace(api=api, guilds=[guild], fetch_guild=AsyncMock(return_value=fetched))
+        bot = SimpleNamespace(api=api, configs=_configs(), guilds=[guild], fetch_guild=AsyncMock(return_value=fetched))
         cog = _make_cog(api=api, bot=bot)
 
         await cog._report_loop.coro(cog)
@@ -164,12 +197,65 @@ class TestReportLoop:
         api = AsyncMock()
         api.report_discord_live.side_effect = APIError(500, "boom")
         fetched = SimpleNamespace(approximate_presence_count=1, approximate_member_count=2)
-        bot = SimpleNamespace(api=api, guilds=[guild], fetch_guild=AsyncMock(return_value=fetched))
+        bot = SimpleNamespace(api=api, configs=_configs(), guilds=[guild], fetch_guild=AsyncMock(return_value=fetched))
         cog = _make_cog(api=api, bot=bot)
 
         await cog._report_loop.coro(cog)  # must not raise
 
         assert guild.id not in cog._not_site_guild_ids
+
+
+class TestPushAudience:
+    async def test_uses_linked_role_as_audience_when_present(self) -> None:
+        linked_role = MagicMock(spec=discord.Role)
+        guild = _fake_guild()
+        guild.get_role.return_value = linked_role
+        api = AsyncMock()
+        bot = SimpleNamespace(api=api, configs=_configs(linked_role_id=100), guilds=[guild], fetch_guild=AsyncMock())
+        cog = _make_cog(api=api, bot=bot)
+
+        with patch.object(live_status, "build_voice_counts", return_value=[]) as mocked:
+            await cog._push(guild)
+
+        guild.get_role.assert_called_once_with(100)
+        mocked.assert_called_once_with(guild, linked_role)
+
+    async def test_falls_back_to_everyone_when_no_linked_role_configured(self) -> None:
+        guild = _fake_guild()
+        api = AsyncMock()
+        bot = SimpleNamespace(api=api, configs=_configs(linked_role_id=None), guilds=[guild], fetch_guild=AsyncMock())
+        cog = _make_cog(api=api, bot=bot)
+
+        with patch.object(live_status, "build_voice_counts", return_value=[]) as mocked:
+            await cog._push(guild)
+
+        mocked.assert_called_once_with(guild, guild.default_role)
+
+    async def test_falls_back_when_linked_role_no_longer_in_guild(self) -> None:
+        guild = _fake_guild()
+        guild.get_role.return_value = None
+        api = AsyncMock()
+        bot = SimpleNamespace(api=api, configs=_configs(linked_role_id=999), guilds=[guild], fetch_guild=AsyncMock())
+        cog = _make_cog(api=api, bot=bot)
+
+        with patch.object(live_status, "build_voice_counts", return_value=[]) as mocked:
+            await cog._push(guild)
+
+        mocked.assert_called_once_with(guild, guild.default_role)
+
+    async def test_config_fetch_failure_falls_back_without_crashing(self) -> None:
+        guild = _fake_guild()
+        api = AsyncMock()
+        configs = AsyncMock()
+        configs.get.side_effect = APIError(500, "boom")
+        bot = SimpleNamespace(api=api, configs=configs, guilds=[guild], fetch_guild=AsyncMock())
+        cog = _make_cog(api=api, bot=bot)
+
+        with patch.object(live_status, "build_voice_counts", return_value=[]) as mocked:
+            await cog._push(guild)  # must not raise
+
+        mocked.assert_called_once_with(guild, guild.default_role)
+        api.report_discord_live.assert_awaited_once()
 
 
 class TestVoiceStateListener:

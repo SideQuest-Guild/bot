@@ -14,8 +14,12 @@ from sidequest_bot.plugins.link_roles import LinkRolesCog, plan_role_changes
 from sidequest_common.schemas import MemberLink
 
 
-def _config(*, linked_role_id: int | None = 100, battlenet_role_id: int | None = 200) -> SimpleNamespace:
-    return SimpleNamespace(linked_role_id=linked_role_id, battlenet_role_id=battlenet_role_id)
+def _config(
+    *, linked_role_id: int | None = 100, battlenet_role_id: int | None = 200, gate_role_id: int | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        linked_role_id=linked_role_id, battlenet_role_id=battlenet_role_id, gate_role_id=gate_role_id
+    )
 
 
 def _fake_role(role_id: int, *, assignable: bool = True) -> MagicMock:
@@ -71,39 +75,39 @@ def _make_interaction(*, guild_id: int = 1) -> Mock:
 
 
 class TestPlanRoleChanges:
-    """Pure: only ever touches the two configured role ids, never anything else."""
+    """Pure: only ever touches the configured role ids, never anything else."""
 
     def test_adds_both_roles_for_new_fully_linked_member(self) -> None:
         to_add, to_remove = plan_role_changes(
-            set(), linked=True, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2
+            set(), linked=True, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert sorted(to_add) == [1, 2]
         assert to_remove == []
 
     def test_adds_only_site_role_without_battlenet(self) -> None:
         to_add, to_remove = plan_role_changes(
-            set(), linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2
+            set(), linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert to_add == [1]
         assert to_remove == []
 
     def test_removes_battlenet_role_on_unlink(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {1, 2}, linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2
+            {1, 2}, linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert to_add == []
         assert to_remove == [2]
 
     def test_removes_both_roles_when_no_longer_a_site_member(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {1, 2}, linked=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2
+            {1, 2}, linked=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert to_add == []
         assert sorted(to_remove) == [1, 2]
 
     def test_never_touches_other_roles(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {999}, linked=True, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2
+            {999}, linked=True, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert sorted(to_add) == [1, 2]
         assert 999 not in to_add
@@ -111,14 +115,42 @@ class TestPlanRoleChanges:
 
     def test_none_role_ids_are_ignored(self) -> None:
         to_add, to_remove = plan_role_changes(
-            set(), linked=True, battlenet_linked=True, linked_role_id=None, battlenet_role_id=None
+            set(), linked=True, battlenet_linked=True, linked_role_id=None, battlenet_role_id=None, gate_role_id=None
         )
         assert to_add == []
         assert to_remove == []
 
     def test_no_change_when_already_correct(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {1}, linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2
+            {1}, linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
+        )
+        assert to_add == []
+        assert to_remove == []
+
+    def test_adds_gate_role_for_unlinked_member(self) -> None:
+        to_add, to_remove = plan_role_changes(
+            set(), linked=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
+        )
+        assert 3 in to_add
+        assert 3 not in to_remove
+
+    def test_removes_gate_role_once_linked(self) -> None:
+        to_add, to_remove = plan_role_changes(
+            {3}, linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
+        )
+        assert 3 not in to_add
+        assert 3 in to_remove
+
+    def test_gate_role_untouched_when_already_correct(self) -> None:
+        to_add, to_remove = plan_role_changes(
+            {3}, linked=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
+        )
+        assert to_add == []
+        assert to_remove == []
+
+    def test_gate_role_none_is_ignored(self) -> None:
+        to_add, to_remove = plan_role_changes(
+            set(), linked=False, battlenet_linked=False, linked_role_id=None, battlenet_role_id=None, gate_role_id=None
         )
         assert to_add == []
         assert to_remove == []
@@ -167,6 +199,54 @@ class TestSyncGuild:
 
         member.add_roles.assert_any_await(site_role, reason="Signed in on sidequest-guild.com")
         member.add_roles.assert_any_await(bnet_role, reason="Linked Battle.net")
+        member.remove_roles.assert_not_awaited()
+
+    async def test_grants_gate_role_to_unlinked_member(self) -> None:
+        gate_role = _fake_role(300)
+        guild = _fake_guild(roles=[gate_role])
+        member = _fake_member(1, role_ids=[])
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=None, battlenet_role_id=None, gate_role_id=300)
+        api = AsyncMock()
+        api.list_member_links.return_value = []
+        cog = _make_cog(api=api, configs=configs)
+
+        await cog._sync_guild(guild)
+
+        member.add_roles.assert_any_await(gate_role, reason="Hasn't signed in on sidequest-guild.com yet")
+        member.remove_roles.assert_not_awaited()
+
+    async def test_removes_gate_role_when_member_signs_in(self) -> None:
+        gate_role = _fake_role(300)
+        guild = _fake_guild(roles=[gate_role])
+        member = _fake_member(1, role_ids=[300])
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=None, battlenet_role_id=None, gate_role_id=300)
+        api = AsyncMock()
+        api.list_member_links.return_value = [MemberLink(discord_id=1, battlenet_linked=False)]
+        cog = _make_cog(api=api, configs=configs)
+
+        await cog._sync_guild(guild)
+
+        member.add_roles.assert_not_awaited()
+        member.remove_roles.assert_any_await(gate_role, reason="Link roles sync")
+
+    async def test_gate_role_untouched_when_not_configured(self) -> None:
+        site_role = _fake_role(100)
+        guild = _fake_guild(roles=[site_role])
+        member = _fake_member(1, role_ids=[])
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=100, battlenet_role_id=None, gate_role_id=None)
+        api = AsyncMock()
+        api.list_member_links.return_value = []
+        cog = _make_cog(api=api, configs=configs)
+
+        await cog._sync_guild(guild)
+
+        member.add_roles.assert_not_awaited()
         member.remove_roles.assert_not_awaited()
 
     async def test_bot_members_are_skipped(self) -> None:
@@ -359,3 +439,30 @@ class TestLinkrolesGroup:
             await LinkRolesCog.linkroles_battlenet.callback(cog, interaction, role)
         update_call = interaction.client.configs.update.await_args
         assert update_call.args[1].battlenet_role_id == 200
+
+    async def test_gate_blocks_a_role_the_invoker_may_not_configure(self) -> None:
+        cog = _make_cog()
+        interaction = _make_interaction()
+        role = Mock(spec=discord.Role)
+        with patch.object(link_roles_module, "autorole_block_reason", return_value="above your rank"):
+            await LinkRolesCog.linkroles_gate.callback(cog, interaction, role)
+        interaction.response.send_message.assert_awaited_once_with("above your rank", ephemeral=True)
+        interaction.client.configs.update.assert_not_awaited()
+
+    async def test_gate_sets_gate_role_id_when_allowed(self) -> None:
+        cog = _make_cog()
+        interaction = _make_interaction()
+        role = Mock(spec=discord.Role)
+        role.id = 300
+        role.mention = "<@&300>"
+        with patch.object(link_roles_module, "autorole_block_reason", return_value=None):
+            await LinkRolesCog.linkroles_gate.callback(cog, interaction, role)
+        update_call = interaction.client.configs.update.await_args
+        assert update_call.args[1].gate_role_id == 300
+
+    async def test_gate_clears_gate_role_id_when_role_omitted(self) -> None:
+        cog = _make_cog()
+        interaction = _make_interaction()
+        await LinkRolesCog.linkroles_gate.callback(cog, interaction, None)
+        update_call = interaction.client.configs.update.await_args
+        assert update_call.args[1].gate_role_id is None

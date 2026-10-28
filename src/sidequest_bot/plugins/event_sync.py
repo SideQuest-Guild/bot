@@ -1,9 +1,9 @@
-"""Two-way raid <-> Discord scheduled event sync.
+"""Two-way guild event <-> Discord scheduled event sync.
 
 Every 15 s: reconcile new guilds once, then pull pending pushes/deletions from the API and apply them to Discord,
 acking each. Discord-side listeners report creates/edits/deletes back to the API immediately. See
-``local://raid-sync-contract.md`` (read at implementation time) for the full wire contract; this module is the bot
-half of it. The API decides what Discord should show; this cog is the only thing that talks to Discord about it.
+``local://guild-events-contract.md`` (read at implementation time) for the full wire contract; this module is the
+bot half of it. The API decides what Discord should show; this cog is the only thing that talks to Discord about it.
 """
 
 import contextlib
@@ -61,7 +61,7 @@ def event_state(event: discord.ScheduledEvent) -> DiscordEventState:
     )
 
 
-class RaidSyncCog(commands.Cog):
+class EventSyncCog(commands.Cog):
     """Periodic push/pull sync plus the Discord-side listeners that report state back immediately."""
 
     def __init__(self, bot: SideQuestBot) -> None:
@@ -88,10 +88,10 @@ class RaidSyncCog(commands.Cog):
                     self._reconciled_guild_ids.add(guild.id)
                 await self._sync_guild(guild)
             except NotFoundError:
-                logger.info("Guild %s is not the site guild; no longer syncing raids there", guild.id)
+                logger.info("Guild %s is not the site guild; no longer syncing events there", guild.id)
                 self._not_site_guild_ids.add(guild.id)
             except APIError:
-                logger.warning("Raid sync failed for guild %s", guild.id, exc_info=True)
+                logger.warning("Event sync failed for guild %s", guild.id, exc_info=True)
 
     @_sync_loop.before_loop
     async def _before_sync_loop(self) -> None:
@@ -101,11 +101,11 @@ class RaidSyncCog(commands.Cog):
         """Report every scheduled event currently in ``guild``, once per process."""
         events = await guild.fetch_scheduled_events()
         reconcile = DiscordEventReconcile(events=[event_state(event) for event in events])
-        await self.bot.api.reconcile_raid_sync(guild.id, reconcile)
+        await self.bot.api.reconcile_event_sync(guild.id, reconcile)
 
     async def _sync_guild(self, guild: discord.Guild) -> None:
         """Apply one cycle's worth of pending deletions and pushes, acking/clearing each as it lands."""
-        pending = await self.bot.api.get_pending_raid_sync(guild.id)
+        pending = await self.bot.api.get_pending_event_sync(guild.id)
         for event_id in pending.deletions:
             if not await self._apply_one(guild, self._apply_deletion(guild, event_id)):
                 return
@@ -120,12 +120,12 @@ class RaidSyncCog(commands.Cog):
         except discord.Forbidden:
             if guild.id not in self._forbidden_guild_ids:
                 logger.warning(
-                    "Missing Manage Events permission in guild %s; raid sync skipped until it's granted", guild.id
+                    "Missing Manage Events permission in guild %s; event sync skipped until it's granted", guild.id
                 )
                 self._forbidden_guild_ids.add(guild.id)
             return False
         except discord.HTTPException, APIError:
-            logger.warning("A raid-sync push failed in guild %s", guild.id, exc_info=True)
+            logger.warning("An event-sync push failed in guild %s", guild.id, exc_info=True)
             return True
         else:
             self._forbidden_guild_ids.discard(guild.id)
@@ -140,7 +140,7 @@ class RaidSyncCog(commands.Cog):
         else:
             with contextlib.suppress(discord.NotFound):
                 await event.delete()
-        await self.bot.api.delete_raid_sync_tombstone(guild.id, event_id)
+        await self.bot.api.delete_event_sync_tombstone(guild.id, event_id)
 
     async def _apply_push(self, guild: discord.Guild, push: DiscordEventPush) -> None:
         """Apply one push and ack it with whatever Discord now holds (``None`` if nothing is linked any more)."""
@@ -149,7 +149,7 @@ class RaidSyncCog(commands.Cog):
         else:
             state = await self._apply_cancel_or_complete(guild, push)
         ack = DiscordPushAck(push_hash=push.push_hash, event=state)
-        await self.bot.api.ack_raid_push(guild.id, push.raid_id, ack)
+        await self.bot.api.ack_event_push(guild.id, push.event_id, ack)
 
     async def _apply_upsert(self, guild: discord.Guild, push: DiscordEventPush) -> DiscordEventState | None:
         event = await self._fetch_event(guild, push.discord_event_id)
@@ -245,4 +245,4 @@ class RaidSyncCog(commands.Cog):
 
 async def setup(bot: SideQuestBot) -> None:
     """Register the cog."""
-    await bot.add_cog(RaidSyncCog(bot))
+    await bot.add_cog(EventSyncCog(bot))

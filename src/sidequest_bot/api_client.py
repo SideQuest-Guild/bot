@@ -13,6 +13,7 @@ from sidequest_common.schemas import (
     DiscordEventState,
     DiscordPushAck,
     DiscordSyncPending,
+    EventSummary,
     GuildConfigSchema,
     GuildConfigUpdate,
     LeaderboardPage,
@@ -45,6 +46,7 @@ API_KEY_HEADER = "X-API-Key"
 _LEVEL_ROLES = TypeAdapter(list[LevelRoleSchema])
 _CASES = TypeAdapter(list[ModCaseSchema])
 _ROLE_MENUS = TypeAdapter(list[RoleMenuSchema])
+_EVENTS = TypeAdapter(list[EventSummary])
 
 
 class APIError(Exception):
@@ -265,29 +267,34 @@ class SideQuestAPI:
         data = await self._request("DELETE", f"{self._guild(guild_id)}/role-menus/{menu_id}/options/{role_id}")
         return RoleMenuSchema.model_validate(data)
 
-    # --- Raid sync
+    # --- Event sync
 
-    async def get_pending_raid_sync(self, guild_id: int) -> DiscordSyncPending:
+    async def get_pending_event_sync(self, guild_id: int) -> DiscordSyncPending:
         """Pushes and deletions the bot should apply to Discord now."""
-        data = await self._request("GET", f"{self._guild(guild_id)}/raid-sync")
+        data = await self._request("GET", f"{self._guild(guild_id)}/event-sync")
         return DiscordSyncPending.model_validate(data)
 
-    async def ack_raid_push(self, guild_id: int, raid_id: UUID, ack: DiscordPushAck) -> None:
-        """Confirm ``ack.push_hash`` was applied (or skipped) for ``raid_id``."""
-        await self._request("POST", f"{self._guild(guild_id)}/raid-sync/{raid_id}/ack", body=ack)
+    async def ack_event_push(self, guild_id: int, event_id: UUID, ack: DiscordPushAck) -> None:
+        """Confirm ``ack.push_hash`` was applied (or skipped) for ``event_id``."""
+        await self._request("POST", f"{self._guild(guild_id)}/event-sync/{event_id}/ack", body=ack)
 
     async def report_discord_event(self, guild_id: int, state: DiscordEventState) -> None:
         """Report that Discord now holds ``state`` for one event (created, edited, or read off the gateway)."""
-        await self._request("POST", f"{self._guild(guild_id)}/raid-sync/events", body=state)
+        await self._request("POST", f"{self._guild(guild_id)}/event-sync/events", body=state)
 
     async def report_discord_event_deleted(self, guild_id: int, event_id: int) -> None:
         """Report that ``event_id`` was deleted in Discord."""
-        await self._request("DELETE", f"{self._guild(guild_id)}/raid-sync/events/{event_id}")
+        await self._request("DELETE", f"{self._guild(guild_id)}/event-sync/events/{event_id}")
 
-    async def delete_raid_sync_tombstone(self, guild_id: int, event_id: int) -> None:
+    async def delete_event_sync_tombstone(self, guild_id: int, event_id: int) -> None:
         """Clear the tombstone for ``event_id`` after deleting it in Discord."""
-        await self._request("DELETE", f"{self._guild(guild_id)}/raid-sync/tombstones/{event_id}")
+        await self._request("DELETE", f"{self._guild(guild_id)}/event-sync/tombstones/{event_id}")
 
-    async def reconcile_raid_sync(self, guild_id: int, reconcile: DiscordEventReconcile) -> None:
+    async def reconcile_event_sync(self, guild_id: int, reconcile: DiscordEventReconcile) -> None:
         """Report every scheduled event currently in the guild."""
-        await self._request("POST", f"{self._guild(guild_id)}/raid-sync/reconcile", body=reconcile)
+        await self._request("POST", f"{self._guild(guild_id)}/event-sync/reconcile", body=reconcile)
+
+    async def list_upcoming_events(self) -> list[EventSummary]:
+        """Upcoming guild events, soonest first (the public ``/api/events`` list; also materializes repeats)."""
+        data = await self._request("GET", "/api/events", params={"when": "upcoming"})
+        return _EVENTS.validate_python(data)

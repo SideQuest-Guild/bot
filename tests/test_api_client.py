@@ -18,7 +18,7 @@ from sidequest_common.schemas import (
 
 BASE = "http://api.test"
 CONFIG_URL = f"{BASE}/api/guilds/1/config"
-RAID_SYNC_URL = f"{BASE}/api/guilds/1/raid-sync"
+EVENT_SYNC_URL = f"{BASE}/api/guilds/1/event-sync"
 CASES_URL = f"{BASE}/api/guilds/1/cases"
 
 
@@ -98,15 +98,15 @@ async def test_client_errors_are_never_retried(api: SideQuestAPI) -> None:
 
 
 @respx.mock
-async def test_get_pending_raid_sync_parses_pushes_and_deletions(api: SideQuestAPI) -> None:
-    raid_id = uuid4()
-    respx.get(RAID_SYNC_URL).mock(
+async def test_get_pending_event_sync_parses_pushes_and_deletions(api: SideQuestAPI) -> None:
+    event_id = uuid4()
+    respx.get(EVENT_SYNC_URL).mock(
         return_value=httpx.Response(
             200,
             json={
                 "pushes": [
                     {
-                        "raid_id": str(raid_id),
+                        "event_id": str(event_id),
                         "discord_event_id": None,
                         "action": "upsert",
                         "name": "Raid Night",
@@ -121,42 +121,42 @@ async def test_get_pending_raid_sync_parses_pushes_and_deletions(api: SideQuestA
             },
         )
     )
-    pending = await api.get_pending_raid_sync(1)
-    assert pending.pushes[0].raid_id == raid_id
+    pending = await api.get_pending_event_sync(1)
+    assert pending.pushes[0].event_id == event_id
     assert pending.deletions == [42]
 
 
 @respx.mock
-async def test_ack_raid_push_posts_to_raid_route(api: SideQuestAPI) -> None:
-    raid_id = uuid4()
-    route = respx.post(f"{RAID_SYNC_URL}/{raid_id}/ack").mock(return_value=httpx.Response(204))
-    await api.ack_raid_push(1, raid_id, DiscordPushAck(push_hash="abc", event=_event_state()))
+async def test_ack_event_push_posts_to_event_route(api: SideQuestAPI) -> None:
+    event_id = uuid4()
+    route = respx.post(f"{EVENT_SYNC_URL}/{event_id}/ack").mock(return_value=httpx.Response(204))
+    await api.ack_event_push(1, event_id, DiscordPushAck(push_hash="abc", event=_event_state()))
     assert route.call_count == 1
 
 
 @respx.mock
 async def test_report_discord_event_posts_state(api: SideQuestAPI) -> None:
-    route = respx.post(f"{RAID_SYNC_URL}/events").mock(return_value=httpx.Response(204))
+    route = respx.post(f"{EVENT_SYNC_URL}/events").mock(return_value=httpx.Response(204))
     await api.report_discord_event(1, _event_state())
     assert route.call_count == 1
 
 
 @respx.mock
 async def test_report_discord_event_deleted_deletes_event(api: SideQuestAPI) -> None:
-    route = respx.delete(f"{RAID_SYNC_URL}/events/42").mock(return_value=httpx.Response(204))
+    route = respx.delete(f"{EVENT_SYNC_URL}/events/42").mock(return_value=httpx.Response(204))
     await api.report_discord_event_deleted(1, 42)
     assert route.call_count == 1
 
 
 @respx.mock
-async def test_delete_raid_sync_tombstone_deletes_tombstone(api: SideQuestAPI) -> None:
-    route = respx.delete(f"{RAID_SYNC_URL}/tombstones/42").mock(return_value=httpx.Response(204))
-    await api.delete_raid_sync_tombstone(1, 42)
+async def test_delete_event_sync_tombstone_deletes_tombstone(api: SideQuestAPI) -> None:
+    route = respx.delete(f"{EVENT_SYNC_URL}/tombstones/42").mock(return_value=httpx.Response(204))
+    await api.delete_event_sync_tombstone(1, 42)
     assert route.call_count == 1
 
 
 @respx.mock
-async def test_reconcile_raid_sync_posts_events(api: SideQuestAPI) -> None:
-    route = respx.post(f"{RAID_SYNC_URL}/reconcile").mock(return_value=httpx.Response(204))
-    await api.reconcile_raid_sync(1, DiscordEventReconcile(events=[_event_state()]))
+async def test_reconcile_event_sync_posts_events(api: SideQuestAPI) -> None:
+    route = respx.post(f"{EVENT_SYNC_URL}/reconcile").mock(return_value=httpx.Response(204))
+    await api.reconcile_event_sync(1, DiscordEventReconcile(events=[_event_state()]))
     assert route.call_count == 1

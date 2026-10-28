@@ -37,7 +37,6 @@ class SideQuestBot(commands.Bot):
         super().__init__(
             command_prefix=commands.when_mentioned,  # slash-only; prefix commands are unused
             intents=build_intents(),
-            activity=discord.Game(name="the long quest"),
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
             tree_cls=SideQuestTree,
         )

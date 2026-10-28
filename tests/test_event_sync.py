@@ -1,4 +1,4 @@
-"""Unit tests for the raid-sync plugin: event_state mapping, push/deletion application, loop and listener behavior."""
+"""Unit tests for the event-sync plugin: event_state mapping, push/deletion application, loop and listener behavior."""
 
 import logging
 from datetime import UTC, datetime
@@ -10,7 +10,7 @@ import discord
 import pytest
 
 from sidequest_bot.api_client import APIError, NotFoundError
-from sidequest_bot.plugins.raid_sync import RaidSyncCog, event_state
+from sidequest_bot.plugins.event_sync import EventSyncCog, event_state
 from sidequest_common.schemas import DiscordEventPush, DiscordEventState, DiscordEventStatus
 
 
@@ -51,14 +51,14 @@ def _fake_event(
 
 def _fake_push(
     *,
-    raid_id: UUID | None = None,
+    event_id: UUID | None = None,
     discord_event_id: int | None = None,
     action: str = "upsert",
     starts_at: datetime = datetime(2099, 1, 1, tzinfo=UTC),
     ends_at: datetime = datetime(2099, 1, 1, 3, tzinfo=UTC),
 ) -> DiscordEventPush:
     return DiscordEventPush(
-        raid_id=raid_id or uuid4(),
+        event_id=event_id or uuid4(),
         discord_event_id=discord_event_id,
         action=action,
         name="Raid Night",
@@ -79,8 +79,8 @@ def _fake_guild(*, guild_id: int = 42) -> MagicMock:
     return guild
 
 
-def _make_cog(*, api: object, guilds: list[object] | None = None) -> RaidSyncCog:
-    cog = RaidSyncCog.__new__(RaidSyncCog)
+def _make_cog(*, api: object, guilds: list[object] | None = None) -> EventSyncCog:
+    cog = EventSyncCog.__new__(EventSyncCog)
     cog.bot = SimpleNamespace(api=api, guilds=guilds or [])
     cog._reconciled_guild_ids = set()
     cog._not_site_guild_ids = set()
@@ -260,7 +260,7 @@ class TestApplyDeletion:
         await cog._apply_deletion(guild, 7)
 
         existing.delete.assert_awaited_once()
-        api.delete_raid_sync_tombstone.assert_awaited_once_with(guild.id, 7)
+        api.delete_event_sync_tombstone.assert_awaited_once_with(guild.id, 7)
 
     async def test_discord_404_still_clears_tombstone(self) -> None:
         guild = _fake_guild()
@@ -270,7 +270,7 @@ class TestApplyDeletion:
 
         await cog._apply_deletion(guild, 7)
 
-        api.delete_raid_sync_tombstone.assert_awaited_once_with(guild.id, 7)
+        api.delete_event_sync_tombstone.assert_awaited_once_with(guild.id, 7)
 
 
 class TestApplyOneAndPush:
@@ -300,7 +300,7 @@ class TestApplyOneAndPush:
         with pytest.raises(discord.Forbidden):
             await cog._apply_push(guild, _fake_push(discord_event_id=None))
 
-        api.ack_raid_push.assert_not_awaited()
+        api.ack_event_push.assert_not_awaited()
 
     async def test_failing_push_does_not_stop_later_pushes(self) -> None:
         cog = _make_cog(api=AsyncMock())
@@ -335,19 +335,19 @@ class TestSyncLoop:
     async def test_not_found_for_guild_stops_syncing_it(self) -> None:
         guild = _fake_guild()
         api = AsyncMock()
-        api.reconcile_raid_sync.side_effect = NotFoundError(404, "not the site guild")
+        api.reconcile_event_sync.side_effect = NotFoundError(404, "not the site guild")
         cog = _make_cog(api=api, guilds=[guild])
 
         await cog._sync_loop.coro(cog)
         await cog._sync_loop.coro(cog)
 
         assert guild.id in cog._not_site_guild_ids
-        assert api.reconcile_raid_sync.await_count == 1
+        assert api.reconcile_event_sync.await_count == 1
 
     async def test_other_api_errors_do_not_crash_the_loop(self) -> None:
         guild = _fake_guild()
         api = AsyncMock()
-        api.reconcile_raid_sync.side_effect = APIError(500, "boom")
+        api.reconcile_event_sync.side_effect = APIError(500, "boom")
         cog = _make_cog(api=api, guilds=[guild])
 
         await cog._sync_loop.coro(cog)  # must not raise

@@ -11,6 +11,7 @@ from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_a
 from sidequest_common.schemas import (
     DiscordEventReconcile,
     DiscordEventState,
+    DiscordLiveReport,
     DiscordPushAck,
     DiscordSyncPending,
     EventSummary,
@@ -298,3 +299,9 @@ class SideQuestAPI:
         """Upcoming guild events, soonest first (the public ``/api/events`` list; also materializes repeats)."""
         data = await self._request("GET", "/api/events", params={"when": "upcoming"})
         return _EVENTS.validate_python(data)
+
+    # --- Live status
+
+    async def report_discord_live(self, guild_id: int, report: DiscordLiveReport) -> None:
+        """Push the current voice/presence snapshot for ``guild_id``."""
+        await self._request("PUT", f"{self._guild(guild_id)}/live", body=report)

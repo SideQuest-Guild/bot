@@ -12,6 +12,7 @@ from sidequest_common.schemas import (
     DiscordEventReconcile,
     DiscordEventState,
     DiscordEventStatus,
+    DiscordLiveReport,
     DiscordPushAck,
     ModCaseCreate,
 )
@@ -159,4 +160,11 @@ async def test_delete_event_sync_tombstone_deletes_tombstone(api: SideQuestAPI) 
 async def test_reconcile_event_sync_posts_events(api: SideQuestAPI) -> None:
     route = respx.post(f"{EVENT_SYNC_URL}/reconcile").mock(return_value=httpx.Response(204))
     await api.reconcile_event_sync(1, DiscordEventReconcile(events=[_event_state()]))
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_report_discord_live_puts_report(api: SideQuestAPI) -> None:
+    route = respx.put(f"{BASE}/api/guilds/1/live").mock(return_value=httpx.Response(204))
+    await api.report_discord_live(1, DiscordLiveReport(online=5, members=20, voice=[]))
     assert route.call_count == 1

@@ -18,6 +18,8 @@ def _make_config(**overrides: Any) -> GuildConfigSchema:
         "welcome_channel_id": None,
         "welcome_message": "hi",
         "auto_role_id": None,
+        "linked_role_id": None,
+        "battlenet_role_id": None,
         "leveling_enabled": True,
         "level_up_channel_id": None,
         "level_up_message": "GG {mention}, level {level}!",

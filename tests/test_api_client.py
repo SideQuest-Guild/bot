@@ -14,6 +14,7 @@ from sidequest_common.schemas import (
     DiscordEventStatus,
     DiscordLiveReport,
     DiscordPushAck,
+    MemberLink,
     ModCaseCreate,
 )
 
@@ -21,6 +22,7 @@ BASE = "http://api.test"
 CONFIG_URL = f"{BASE}/api/guilds/1/config"
 EVENT_SYNC_URL = f"{BASE}/api/guilds/1/event-sync"
 CASES_URL = f"{BASE}/api/guilds/1/cases"
+MEMBER_LINKS_URL = f"{BASE}/api/guilds/1/member-links"
 
 
 def _event_state(**overrides: object) -> DiscordEventState:
@@ -168,3 +170,13 @@ async def test_report_discord_live_puts_report(api: SideQuestAPI) -> None:
     route = respx.put(f"{BASE}/api/guilds/1/live").mock(return_value=httpx.Response(204))
     await api.report_discord_live(1, DiscordLiveReport(online=5, members=20, voice=[]))
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_list_member_links_parses_response(api: SideQuestAPI) -> None:
+    route = respx.get(MEMBER_LINKS_URL).mock(
+        return_value=httpx.Response(200, json=[{"discord_id": 123, "battlenet_linked": True}])
+    )
+    links = await api.list_member_links(1)
+    assert route.call_count == 1
+    assert links == [MemberLink(discord_id=123, battlenet_linked=True)]

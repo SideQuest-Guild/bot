@@ -21,6 +21,7 @@ from sidequest_common.schemas import (
     LevelRoleSchema,
     LevelRoleUpsert,
     MemberLevelSchema,
+    MemberLink,
     ModCaseCreate,
     ModCaseSchema,
     ModCaseUpdate,
@@ -48,6 +49,7 @@ _LEVEL_ROLES = TypeAdapter(list[LevelRoleSchema])
 _CASES = TypeAdapter(list[ModCaseSchema])
 _ROLE_MENUS = TypeAdapter(list[RoleMenuSchema])
 _EVENTS = TypeAdapter(list[EventSummary])
+_MEMBER_LINKS = TypeAdapter(list[MemberLink])
 
 
 class APIError(Exception):
@@ -160,6 +162,13 @@ class SideQuestAPI:
         """Apply only the fields set on ``changes``."""
         data = await self._request("PATCH", f"{self._guild(guild_id)}/config", body=changes, exclude_unset=True)
         return GuildConfigSchema.model_validate(data)
+
+    # --- Member links
+
+    async def list_member_links(self, guild_id: int) -> list[MemberLink]:
+        """Every signed-in member of ``guild_id``, and whether they've also linked Battle.net."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/member-links")
+        return _MEMBER_LINKS.validate_python(data)
 
     # --- Leveling
 

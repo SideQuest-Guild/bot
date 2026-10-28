@@ -95,10 +95,7 @@ class LinkRolesCog(commands.Cog):
 
     linkroles_group = app_commands.Group(
         name="linkroles",
-        description=(
-            "Configure the roles granted for signing in on the site, linking Battle.net, the gate role, and "
-            "roster confirmation."
-        ),
+        description="Configure the roles the bot keeps in sync with site sign-in, Battle.net and the guild roster.",
         guild_only=True,
         default_permissions=discord.Permissions(manage_guild=True),
     )

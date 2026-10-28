@@ -12,6 +12,9 @@ def main() -> None:
     from sidequest_common.settings import APISettings, DiscordSettings
 
     discord.utils.setup_logging(level=logging.INFO)
+    # httpx logs every request at INFO; the raid-sync poll alone would add four lines a minute. Failures still surface
+    # through APIError handling and the bot's own warnings.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     discord_settings = DiscordSettings()
     api_settings = APISettings()
     bot = create_bot(discord_settings, api_settings)

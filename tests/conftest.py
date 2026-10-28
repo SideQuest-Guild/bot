@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import sidequest_common.models  # noqa: F401  # register tables on UUIDAuditBase.metadata
 from sidequest_api.app import create_app
 from sidequest_bot.api_client import API_KEY_HEADER, SideQuestAPI
-from sidequest_common.settings import APISettings, DatabaseSettings
+from sidequest_common.settings import APISettings, DatabaseSettings, WebSettings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -43,8 +43,8 @@ async def db_sessionmaker(database_url: str) -> AsyncIterator[async_sessionmaker
 
 @pytest.fixture
 def api_app(database_url: str) -> Litestar:
-    """Fresh app on the per-test database."""
-    return create_app(DatabaseSettings(URL=database_url), APISettings(KEY=TEST_API_KEY))
+    """Fresh app on the per-test database. Web settings ignore the developer's ``.env`` (Discord/Battle.net unset)."""
+    return create_app(DatabaseSettings(URL=database_url), APISettings(KEY=TEST_API_KEY), WebSettings(_env_file=None))
 
 
 @pytest.fixture

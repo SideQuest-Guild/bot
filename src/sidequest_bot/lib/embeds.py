@@ -13,6 +13,7 @@ class Colors:
     GREEN = discord.Colour(0x2ECC71)  # success / joins / role added
     RED = discord.Colour(0xE74C3C)  # destructive: deletes, bans, leaves
     SLATE = discord.Colour(0x607D8B)  # neutral / edits
+    SITE_GOLD = discord.Colour(0xD8AB5C)  # sidequest-guild.com's gold: public panels such as role menus
 
 
 def make_embed(

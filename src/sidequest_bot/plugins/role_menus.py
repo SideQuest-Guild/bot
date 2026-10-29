@@ -72,7 +72,7 @@ def render_menu_embed(menu: RoleMenuSchema) -> discord.Embed:
         description = f"{description}\n\n" if description else ""
         description += "\n".join(lines)
     description = truncate(description, DESCRIPTION_LIMIT) if description else None
-    return make_embed(menu.title, description, color=Colors.BLUE)
+    return make_embed(menu.title, description, color=Colors.SITE_GOLD)
 
 
 def _render_option_line(option: RoleMenuOptionSchema) -> str:

@@ -5,7 +5,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Self
 
 import httpx
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_after_attempt, wait_exponential
 
 from sidequest_common.schemas import (
@@ -69,6 +69,23 @@ class NotFoundError(APIError):
 
 class APIUnavailableError(APIError):
     """The API couldn't be reached (connection/timeout) after retries. Reported as status 503."""
+
+
+class APIResponseShapeError(APIError):
+    """The API answered, but not in the shape this bot expects: usually the other half of a rolling deploy.
+
+    Raised as an APIError (status 502) so every caller's existing APIError handling covers it; a bare pydantic
+    ValidationError escaping a discord.py ``tasks.loop`` would stop that loop until the bot restarts.
+    """
+
+
+def _parse[T](validate: Callable[[object], T], data: object) -> T:
+    """Validate an API response with ``validate``, turning a schema mismatch into :class:`APIResponseShapeError`."""
+    try:
+        return validate(data)
+    except ValidationError as exc:
+        detail = f"unexpected response shape ({exc.error_count()} error(s)): {exc.errors()[0]['loc']}"
+        raise APIResponseShapeError(HTTPStatus.BAD_GATEWAY, detail) from exc
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -158,54 +175,54 @@ class SideQuestAPI:
     async def get_guild_config(self, guild_id: int) -> GuildConfigSchema:
         """Config for ``guild_id`` (created with defaults on first access)."""
         data = await self._request("GET", f"{self._guild(guild_id)}/config")
-        return GuildConfigSchema.model_validate(data)
+        return _parse(GuildConfigSchema.model_validate, data)
 
     async def update_guild_config(self, guild_id: int, changes: GuildConfigUpdate) -> GuildConfigSchema:
         """Apply only the fields set on ``changes``."""
         data = await self._request("PATCH", f"{self._guild(guild_id)}/config", body=changes, exclude_unset=True)
-        return GuildConfigSchema.model_validate(data)
+        return _parse(GuildConfigSchema.model_validate, data)
 
     # --- Member links
 
     async def list_member_links(self, guild_id: int) -> list[MemberLink]:
         """Every signed-in member of ``guild_id``, and whether they've also linked Battle.net."""
         data = await self._request("GET", f"{self._guild(guild_id)}/member-links")
-        return _MEMBER_LINKS.validate_python(data)
+        return _parse(_MEMBER_LINKS.validate_python, data)
 
     # --- Leveling
 
     async def award_xp(self, guild_id: int, user_id: int) -> XPAwardResult:
         """Award one message's worth of XP (API enforces cooldown and amount)."""
         data = await self._request("POST", f"{self._guild(guild_id)}/members/{user_id}/xp")
-        return XPAwardResult.model_validate(data)
+        return _parse(XPAwardResult.model_validate, data)
 
     async def set_xp(self, guild_id: int, user_id: int, xp: int) -> MemberLevelSchema:
         """Overwrite a member's XP total; level is recomputed."""
         data = await self._request("PUT", f"{self._guild(guild_id)}/members/{user_id}/xp", body=SetXPRequest(xp=xp))
-        return MemberLevelSchema.model_validate(data)
+        return _parse(MemberLevelSchema.model_validate, data)
 
     async def get_rank(self, guild_id: int, user_id: int) -> RankSchema:
         """A member's rank; members without XP get ``rank=None`` and zeros."""
         data = await self._request("GET", f"{self._guild(guild_id)}/members/{user_id}/rank")
-        return RankSchema.model_validate(data)
+        return _parse(RankSchema.model_validate, data)
 
     async def get_leaderboard(self, guild_id: int, *, limit: int = 10, offset: int = 0) -> LeaderboardPage:
         """Highest XP first."""
         data = await self._request(
             "GET", f"{self._guild(guild_id)}/leaderboard", params={"limit": limit, "offset": offset}
         )
-        return LeaderboardPage.model_validate(data)
+        return _parse(LeaderboardPage.model_validate, data)
 
     async def list_level_roles(self, guild_id: int) -> list[LevelRoleSchema]:
         """Level rewards, lowest level first."""
-        return _LEVEL_ROLES.validate_python(await self._request("GET", f"{self._guild(guild_id)}/level-roles"))
+        return _parse(_LEVEL_ROLES.validate_python, await self._request("GET", f"{self._guild(guild_id)}/level-roles"))
 
     async def set_level_role(self, guild_id: int, level: int, role_id: int) -> LevelRoleSchema:
         """Grant ``role_id`` at ``level`` (replaces any existing reward for that level)."""
         data = await self._request(
             "PUT", f"{self._guild(guild_id)}/level-roles/{level}", body=LevelRoleUpsert(role_id=role_id)
         )
-        return LevelRoleSchema.model_validate(data)
+        return _parse(LevelRoleSchema.model_validate, data)
 
     async def delete_level_role(self, guild_id: int, level: int) -> None:
         """Remove the reward at ``level``. Raises NotFoundError if none."""
@@ -215,7 +232,9 @@ class SideQuestAPI:
 
     async def create_case(self, guild_id: int, case: ModCaseCreate) -> ModCaseSchema:
         """Record a moderation action; the API assigns the case number."""
-        return ModCaseSchema.model_validate(await self._request("POST", f"{self._guild(guild_id)}/cases", body=case))
+        return _parse(
+            ModCaseSchema.model_validate, await self._request("POST", f"{self._guild(guild_id)}/cases", body=case)
+        )
 
     async def list_cases(
         self, guild_id: int, *, user_id: int | None = None, limit: int = 25, offset: int = 0
@@ -224,42 +243,44 @@ class SideQuestAPI:
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if user_id is not None:
             params["user_id"] = user_id
-        return _CASES.validate_python(await self._request("GET", f"{self._guild(guild_id)}/cases", params=params))
+        return _parse(
+            _CASES.validate_python, await self._request("GET", f"{self._guild(guild_id)}/cases", params=params)
+        )
 
     async def get_case(self, guild_id: int, case_number: int) -> ModCaseSchema:
         """One case. Raises NotFoundError if missing."""
         data = await self._request("GET", f"{self._guild(guild_id)}/cases/{case_number}")
-        return ModCaseSchema.model_validate(data)
+        return _parse(ModCaseSchema.model_validate, data)
 
     async def update_case(self, guild_id: int, case_number: int, changes: ModCaseUpdate) -> ModCaseSchema:
         """Edit a case (currently just its reason)."""
         data = await self._request(
             "PATCH", f"{self._guild(guild_id)}/cases/{case_number}", body=changes, exclude_unset=True
         )
-        return ModCaseSchema.model_validate(data)
+        return _parse(ModCaseSchema.model_validate, data)
 
     # --- Role menus
 
     async def create_role_menu(self, guild_id: int, menu: RoleMenuCreate) -> RoleMenuSchema:
         """Create a menu (no message yet; PATCH ``message_id`` after posting)."""
         data = await self._request("POST", f"{self._guild(guild_id)}/role-menus", body=menu)
-        return RoleMenuSchema.model_validate(data)
+        return _parse(RoleMenuSchema.model_validate, data)
 
     async def list_role_menus(self, guild_id: int) -> list[RoleMenuSchema]:
         """All menus in the guild."""
-        return _ROLE_MENUS.validate_python(await self._request("GET", f"{self._guild(guild_id)}/role-menus"))
+        return _parse(_ROLE_MENUS.validate_python, await self._request("GET", f"{self._guild(guild_id)}/role-menus"))
 
     async def get_role_menu(self, guild_id: int, menu_id: UUID) -> RoleMenuSchema:
         """One menu with its options."""
         data = await self._request("GET", f"{self._guild(guild_id)}/role-menus/{menu_id}")
-        return RoleMenuSchema.model_validate(data)
+        return _parse(RoleMenuSchema.model_validate, data)
 
     async def update_role_menu(self, guild_id: int, menu_id: UUID, changes: RoleMenuUpdate) -> RoleMenuSchema:
         """Apply only the fields set on ``changes``."""
         data = await self._request(
             "PATCH", f"{self._guild(guild_id)}/role-menus/{menu_id}", body=changes, exclude_unset=True
         )
-        return RoleMenuSchema.model_validate(data)
+        return _parse(RoleMenuSchema.model_validate, data)
 
     async def delete_role_menu(self, guild_id: int, menu_id: UUID) -> None:
         """Delete a menu and its options."""
@@ -272,19 +293,19 @@ class SideQuestAPI:
         data = await self._request(
             "PUT", f"{self._guild(guild_id)}/role-menus/{menu_id}/options/{role_id}", body=option
         )
-        return RoleMenuSchema.model_validate(data)
+        return _parse(RoleMenuSchema.model_validate, data)
 
     async def delete_role_menu_option(self, guild_id: int, menu_id: UUID, role_id: int) -> RoleMenuSchema:
         """Remove the button for ``role_id``; returns the updated menu."""
         data = await self._request("DELETE", f"{self._guild(guild_id)}/role-menus/{menu_id}/options/{role_id}")
-        return RoleMenuSchema.model_validate(data)
+        return _parse(RoleMenuSchema.model_validate, data)
 
     # --- Event sync
 
     async def get_pending_event_sync(self, guild_id: int) -> DiscordSyncPending:
         """Pushes and deletions the bot should apply to Discord now."""
         data = await self._request("GET", f"{self._guild(guild_id)}/event-sync")
-        return DiscordSyncPending.model_validate(data)
+        return _parse(DiscordSyncPending.model_validate, data)
 
     async def ack_event_push(self, guild_id: int, event_id: UUID, ack: DiscordPushAck) -> None:
         """Confirm ``ack.push_hash`` was applied (or skipped) for ``event_id``."""
@@ -317,7 +338,7 @@ class SideQuestAPI:
     async def list_upcoming_events(self) -> list[EventSummary]:
         """Upcoming guild events, soonest first (the public ``/api/events`` list; also materializes repeats)."""
         data = await self._request("GET", "/api/events", params={"when": "upcoming"})
-        return _EVENTS.validate_python(data)
+        return _parse(_EVENTS.validate_python, data)
 
     # --- Live status
 

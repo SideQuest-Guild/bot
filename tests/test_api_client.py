@@ -6,7 +6,7 @@ import respx
 from tenacity import wait_none
 
 from sidequest_bot import api_client
-from sidequest_bot.api_client import APIError, APIUnavailableError, NotFoundError, SideQuestAPI
+from sidequest_bot.api_client import APIError, APIResponseShapeError, APIUnavailableError, NotFoundError, SideQuestAPI
 from sidequest_common.schemas import (
     CaseAction,
     DiscordEventReconcile,
@@ -98,6 +98,29 @@ async def test_client_errors_are_never_retried(api: SideQuestAPI) -> None:
         await api.get_guild_config(1)
     assert route.call_count == 1
     assert excinfo.value.detail == "bad key"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("url", "body", "call"),
+    [
+        (CONFIG_URL, {}, lambda api: api.get_guild_config(1)),
+        (f"{BASE}/api/events", [{"id": "x"}], lambda api: api.list_upcoming_events()),
+    ],
+    ids=["model", "list"],
+)
+async def test_unexpected_response_shape_is_an_api_error(
+    api: SideQuestAPI, url: str, body: object, call: object
+) -> None:
+    # The other half of a rolling deploy answers in an older shape. That must reach callers as an APIError (which
+    # every bot loop already handles), never as a bare pydantic error that would kill a discord.py tasks.loop.
+    respx.get(url).mock(return_value=httpx.Response(200, json=body))
+
+    with pytest.raises(APIError) as excinfo:
+        await call(api)  # type: ignore[operator]
+
+    assert isinstance(excinfo.value, APIResponseShapeError)
+    assert excinfo.value.status_code == 502
 
 
 @respx.mock

@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from pydantic import ValidationError
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
@@ -122,9 +121,9 @@ class LinkRolesCog(commands.Cog):
             except NotFoundError:
                 logger.info("Guild %s is not the site guild; no longer syncing link roles there", guild.id)
                 self._not_site_guild_ids.add(guild.id)
-            except APIError, ValidationError:
-                # A failure here must not escape: an unhandled exception stops a tasks.loop for good. A response
-                # that doesn't match the schema (e.g. an API still on the previous release) is retried next tick.
+            except APIError:
+                # A failure here must not escape: an unhandled exception stops a tasks.loop for good. That includes a
+                # response in the wrong shape (e.g. an API still on the previous release), retried next tick.
                 logger.warning("Link role sync failed for guild %s", guild.id, exc_info=True)
 
     @_sync_loop.before_loop

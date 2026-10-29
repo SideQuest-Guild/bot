@@ -6,9 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import discord
 import pytest
-from pydantic import ValidationError
 
-from sidequest_bot.api_client import APIError, NotFoundError
+from sidequest_bot.api_client import APIError, APIResponseShapeError, NotFoundError
 from sidequest_bot.plugins import link_roles as link_roles_module
 from sidequest_bot.plugins.link_roles import LinkRolesCog, plan_role_changes
 from sidequest_common.schemas import MemberLink
@@ -475,14 +474,10 @@ class TestSyncLoop:
             APIError(500, "boom"),
             # What production hit during a rolling deploy: the bot updated before the API, whose config response
             # didn't match the bot's schema yet. Escaping here stops the tasks.loop for good.
-            pytest.param(lambda: MemberLink.model_validate({}), id="response-shape-mismatch"),
+            pytest.param(APIResponseShapeError(502, "unexpected response shape"), id="response-shape-mismatch"),
         ],
     )
-    async def test_failed_fetch_does_not_crash_the_loop(self, error: object) -> None:
-        if callable(error):
-            with pytest.raises(ValidationError) as excinfo:
-                error()
-            error = excinfo.value
+    async def test_failed_fetch_does_not_crash_the_loop(self, error: APIError) -> None:
         guild = _fake_guild()
         configs = AsyncMock()
         configs.get.side_effect = error

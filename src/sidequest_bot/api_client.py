@@ -9,8 +9,10 @@ from pydantic import TypeAdapter
 from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_after_attempt, wait_exponential
 
 from sidequest_common.schemas import (
+    ActivityAck,
     DiscordEventReconcile,
     DiscordEventState,
+    DiscordInterestReport,
     DiscordLiveReport,
     DiscordPushAck,
     DiscordSyncPending,
@@ -303,6 +305,14 @@ class SideQuestAPI:
     async def reconcile_event_sync(self, guild_id: int, reconcile: DiscordEventReconcile) -> None:
         """Report every scheduled event currently in the guild."""
         await self._request("POST", f"{self._guild(guild_id)}/event-sync/reconcile", body=reconcile)
+
+    async def report_event_interest(self, guild_id: int, discord_event_id: int, report: DiscordInterestReport) -> None:
+        """Replace the interested-user set for the guild event linked to ``discord_event_id``; no-op if unlinked."""
+        await self._request("PUT", f"{self._guild(guild_id)}/event-sync/interest/{discord_event_id}", body=report)
+
+    async def ack_event_activity(self, guild_id: int, ids: list[UUID]) -> None:
+        """Confirm these sign-up activity rows were posted in their event's forum thread."""
+        await self._request("POST", f"{self._guild(guild_id)}/event-sync/activity/ack", body=ActivityAck(ids=ids))
 
     async def list_upcoming_events(self) -> list[EventSummary]:
         """Upcoming guild events, soonest first (the public ``/api/events`` list; also materializes repeats)."""

@@ -25,7 +25,7 @@ def _event(
         size=None,
         status=status,
         notes=None,
-        counts=EventCounts(tank=0, healer=0, dps=0, signed=0, tentative=0, absent=0),
+        counts=EventCounts(tank=0, healer=0, dps=0, signed=0, tentative=0, absent=0, interested=0),
         series=None,
     )
 

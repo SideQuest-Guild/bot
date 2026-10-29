@@ -111,12 +111,15 @@ async def test_get_pending_event_sync_parses_pushes_and_deletions(api: SideQuest
                     {
                         "event_id": str(event_id),
                         "discord_event_id": None,
+                        "kind": "raid",
                         "action": "upsert",
                         "name": "Raid Night",
+                        "title": "Raid Night",
                         "description": "desc",
                         "location": "Molten Core",
                         "starts_at": "2026-01-01T00:00:00Z",
                         "ends_at": "2026-01-01T03:00:00Z",
+                        "signup_url": "https://example.com/events/detail/?id=abc",
                         "push_hash": "abc",
                     }
                 ],

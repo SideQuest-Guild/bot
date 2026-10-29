@@ -26,6 +26,8 @@ from sidequest_common.schemas import (
     LevelRoleUpsert,
     MemberLevelSchema,
     MemberLink,
+    MemberProfileIn,
+    MemberProfilesReplace,
     ModCaseCreate,
     ModCaseSchema,
     ModCaseUpdate,
@@ -351,3 +353,13 @@ class SideQuestAPI:
     async def put_guild_roles(self, guild_id: int, roles: list[GuildRoleIn]) -> None:
         """Replace ``guild_id``'s full role set (excluding ``@everyone``, dropped by the caller)."""
         await self._request("PUT", f"{self._guild(guild_id)}/roles", body=GuildRolesReplace(roles=roles))
+
+    async def put_member_profiles(
+        self, guild_id: int, profiles: list[MemberProfileIn], departed_ids: list[int]
+    ) -> None:
+        """Push linked members' current Discord profiles and report linked members who've left."""
+        await self._request(
+            "PUT",
+            f"{self._guild(guild_id)}/member-profiles",
+            body=MemberProfilesReplace(profiles=profiles, departed_ids=departed_ids),
+        )

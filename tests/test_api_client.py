@@ -17,6 +17,7 @@ from sidequest_common.schemas import (
     DiscordPushAck,
     GuildRoleIn,
     MemberLink,
+    MemberProfileIn,
     ModCaseCreate,
 )
 
@@ -25,6 +26,7 @@ CONFIG_URL = f"{BASE}/api/guilds/1/config"
 EVENT_SYNC_URL = f"{BASE}/api/guilds/1/event-sync"
 CASES_URL = f"{BASE}/api/guilds/1/cases"
 MEMBER_LINKS_URL = f"{BASE}/api/guilds/1/member-links"
+MEMBER_PROFILES_URL = f"{BASE}/api/guilds/1/member-profiles"
 
 
 def _event_state(**overrides: object) -> DiscordEventState:
@@ -218,3 +220,34 @@ async def test_put_guild_roles_puts_full_set(api: SideQuestAPI) -> None:
     assert route.call_count == 1
     sent = json.loads(route.calls.last.request.content)
     assert sent == {"roles": [{"id": 1, "name": "Officer", "color": 16711680, "position": 2, "managed": False}]}
+
+
+@respx.mock
+async def test_put_member_profiles_puts_profiles_and_departed_ids(api: SideQuestAPI) -> None:
+    route = respx.put(MEMBER_PROFILES_URL).mock(return_value=httpx.Response(204))
+    profiles = [
+        MemberProfileIn(
+            discord_id=1,
+            username="hailcaesar4288",
+            global_name="HailCaesar",
+            guild_nick=None,
+            avatar_hash="abc123",
+            roles=[100],
+        )
+    ]
+    await api.put_member_profiles(1, profiles, [2])
+    assert route.call_count == 1
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {
+        "profiles": [
+            {
+                "discord_id": 1,
+                "username": "hailcaesar4288",
+                "global_name": "HailCaesar",
+                "guild_nick": None,
+                "avatar_hash": "abc123",
+                "roles": [100],
+            }
+        ],
+        "departed_ids": [2],
+    }

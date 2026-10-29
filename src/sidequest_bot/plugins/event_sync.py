@@ -14,6 +14,7 @@ and commented on as members sign up, go tentative, decline, or withdraw.
 import asyncio
 import contextlib
 import logging
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +63,9 @@ _DESCRIPTION_FOOTER_HEADER = "── SideQuest event ──"
 
 _ACTIVITY_EMOJI = {"going": "✅", "maybe": "❔", "not_going": "❌", "withdrew": "↩️"}
 _ACTIVITY_VERB = {"going": "is going", "maybe": "might make it", "not_going": "can't make it", "withdrew": "withdrew"}
+# Discord markdown characters (plus a line-leading list dash) in a member's sign-up comment, escaped so it shows as
+# typed. discord.utils.escape_markdown would do, but it trips a DeprecationWarning on Python 3.15.
+_COMMENT_MARKDOWN = re.compile(r"[\\*_~`|>#\[\]]|^-", re.MULTILINE)
 
 
 def _utc(value: datetime) -> datetime:
@@ -128,12 +132,19 @@ def build_starter_message(push: DiscordEventPush, *, guild_id: int, discord_even
 
 
 def build_activity_line(activity: SignupActivity) -> str:
-    """One forum-comment line for ``activity``, e.g. "✅ **Coffee** is going — Oakenshield · Warrior · Tank"."""
-    emoji = _ACTIVITY_EMOJI[activity.action]
-    verb = _ACTIVITY_VERB[activity.action]
-    line = f"{emoji} **{activity.display_name}** {verb}"
+    """One forum comment for ``activity``, e.g. "✅ <@123> is going — Oakenshield · Warrior · Tank".
+
+    The member is @-mentioned when the row carries their Discord id (it links to them; the send passes
+    ``AllowedMentions.none()`` so nobody is pinged), else their name is bolded. A sign-up comment follows as a quote,
+    markdown-escaped so it shows as typed.
+    """
+    who = f"<@{activity.discord_id}>" if activity.discord_id is not None else f"**{activity.display_name}**"
+    line = f"{_ACTIVITY_EMOJI[activity.action]} {who} {_ACTIVITY_VERB[activity.action]}"
     if activity.detail:
         line += f" — {activity.detail}"
+    if activity.comment and activity.comment.strip():
+        quoted = _COMMENT_MARKDOWN.sub(lambda m: "\\" + m.group(0), activity.comment.strip()).splitlines()
+        line += "".join(f"\n> {text}" for text in quoted)
     return line
 
 

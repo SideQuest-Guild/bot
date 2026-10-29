@@ -481,6 +481,28 @@ class TestBuildActivityLine:
         )
         assert build_activity_line(activity) == "✅ **Coffee** is going — Oakenshield · Warrior · Tank"
 
+    def test_mentions_member_and_quotes_comment_escaped(self) -> None:
+        activity = SignupActivity(
+            id=uuid4(),
+            thread_id=1,
+            display_name="Bad Messages",
+            action="going",
+            discord_id=229053264241360900,
+            comment="  Can we play *Hello Kitty* instead?\n# please\n- [free](https://x.test) - ok  ",
+        )
+        assert build_activity_line(activity) == (
+            "✅ <@229053264241360900> is going\n"
+            "> Can we play \\*Hello Kitty\\* instead?\n"
+            "> \\# please\n"
+            "> \\- \\[free\\](https://x.test) - ok"
+        )
+
+    def test_blank_comment_adds_nothing(self) -> None:
+        activity = SignupActivity(
+            id=uuid4(), thread_id=1, display_name="Coffee", action="maybe", discord_id=5, comment="   "
+        )
+        assert build_activity_line(activity) == "❔ <@5> might make it"
+
 
 class TestFindTag:
     def test_matches_by_kind_label(self) -> None:

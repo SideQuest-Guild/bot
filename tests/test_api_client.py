@@ -1,3 +1,4 @@
+import json
 from uuid import uuid4
 
 import httpx
@@ -14,6 +15,7 @@ from sidequest_common.schemas import (
     DiscordEventStatus,
     DiscordLiveReport,
     DiscordPushAck,
+    GuildRoleIn,
     MemberLink,
     ModCaseCreate,
 )
@@ -206,3 +208,13 @@ async def test_list_member_links_parses_response(api: SideQuestAPI) -> None:
     links = await api.list_member_links(1)
     assert route.call_count == 1
     assert links == [MemberLink(discord_id=123, battlenet_linked=True)]
+
+
+@respx.mock
+async def test_put_guild_roles_puts_full_set(api: SideQuestAPI) -> None:
+    route = respx.put(f"{BASE}/api/guilds/1/roles").mock(return_value=httpx.Response(204))
+    roles = [GuildRoleIn(id=1, name="Officer", color=16711680, position=2, managed=False)]
+    await api.put_guild_roles(1, roles)
+    assert route.call_count == 1
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"roles": [{"id": 1, "name": "Officer", "color": 16711680, "position": 2, "managed": False}]}

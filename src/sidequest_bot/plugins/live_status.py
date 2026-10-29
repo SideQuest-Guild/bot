@@ -18,7 +18,7 @@ from discord.ext import commands, tasks
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
-from sidequest_common.schemas import DiscordLiveReport, VoiceChannelCount
+from sidequest_common.schemas import DiscordLiveReport, GuildRoleIn, VoiceChannelCount
 
 if TYPE_CHECKING:
     from sidequest_common.schemas import GuildConfigSchema
@@ -45,6 +45,15 @@ def build_voice_counts(guild: discord.Guild, audience: discord.Role) -> list[Voi
     return [
         VoiceChannelCount(name=channel.name, count=sum(1 for member in channel.members if not member.bot))
         for channel in channels
+    ]
+
+
+def build_guild_roles(guild: discord.Guild) -> list[GuildRoleIn]:
+    """Every Discord role in ``guild`` except ``@everyone`` (its id equals the guild's id)."""
+    return [
+        GuildRoleIn(id=role.id, name=role.name, color=role.color.value, position=role.position, managed=role.managed)
+        for role in guild.roles
+        if role.id != guild.id
     ]
 
 
@@ -120,8 +129,20 @@ class LiveStatusCog(commands.Cog):
         except NotFoundError:
             logger.info("Guild %s is not the site guild; no longer reporting live status there", guild.id)
             self._not_site_guild_ids.add(guild.id)
+            return
         except APIError:
             logger.warning("Failed to report live status for guild %s", guild.id, exc_info=True)
+        await self._push_roles(guild)
+
+    async def _push_roles(self, guild: discord.Guild) -> None:
+        """Push the guild's full current role set, tolerant of a non-site guild or other API failures."""
+        try:
+            await self.bot.api.put_guild_roles(guild.id, build_guild_roles(guild))
+        except NotFoundError:
+            logger.info("Guild %s is not the site guild; no longer pushing roles there", guild.id)
+            self._not_site_guild_ids.add(guild.id)
+        except APIError:
+            logger.warning("Failed to push roles for guild %s", guild.id, exc_info=True)
 
     # --- Debounced voice-state listener --------------------------------------------------------------------------
 

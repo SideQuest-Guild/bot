@@ -9,8 +9,8 @@ import pytest
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.plugins import live_status
-from sidequest_bot.plugins.live_status import LiveStatusCog, build_voice_counts
-from sidequest_common.schemas import DiscordLiveReport, VoiceChannelCount
+from sidequest_bot.plugins.live_status import LiveStatusCog, build_guild_roles, build_voice_counts
+from sidequest_common.schemas import DiscordLiveReport, GuildRoleIn, VoiceChannelCount
 
 
 def _fake_category(*, category_id: int, position: int) -> MagicMock:
@@ -48,13 +48,18 @@ def _fake_member(*, bot: bool = False) -> MagicMock:
 
 
 def _fake_guild(
-    *, guild_id: int = 42, voice_channels: list[MagicMock] | None = None, stage_channels: list[MagicMock] | None = None
+    *,
+    guild_id: int = 42,
+    voice_channels: list[MagicMock] | None = None,
+    stage_channels: list[MagicMock] | None = None,
+    roles: list[MagicMock] | None = None,
 ) -> MagicMock:
     guild = MagicMock(spec=discord.Guild)
     guild.id = guild_id
     guild.default_role = MagicMock(spec=discord.Role)
     guild.voice_channels = voice_channels or []
     guild.stage_channels = stage_channels or []
+    guild.roles = roles or []
     guild.get_role = MagicMock(return_value=None)
     return guild
 
@@ -201,6 +206,84 @@ class TestReportLoop:
         cog = _make_cog(api=api, bot=bot)
 
         await cog._report_loop.coro(cog)  # must not raise
+
+        assert guild.id not in cog._not_site_guild_ids
+
+
+def _fake_role(
+    *, role_id: int, name: str = "Role", color: int = 0, position: int = 0, managed: bool = False
+) -> MagicMock:
+    role = MagicMock(spec=discord.Role)
+    role.id = role_id
+    role.name = name
+    role.color = SimpleNamespace(value=color)
+    role.position = position
+    role.managed = managed
+    return role
+
+
+class TestBuildGuildRoles:
+    def test_excludes_everyone_role(self) -> None:
+        everyone = _fake_role(role_id=42)
+        officer = _fake_role(role_id=7, name="Officer", color=16711680, position=3)
+        guild = _fake_guild(guild_id=42, roles=[everyone, officer])
+
+        result = build_guild_roles(guild)
+
+        assert result == [GuildRoleIn(id=7, name="Officer", color=16711680, position=3, managed=False)]
+
+    def test_includes_managed_roles(self) -> None:
+        bot_role = _fake_role(role_id=9, name="Bot", managed=True)
+        guild = _fake_guild(guild_id=42, roles=[bot_role])
+
+        result = build_guild_roles(guild)
+
+        assert result == [GuildRoleIn(id=9, name="Bot", color=0, position=0, managed=True)]
+
+
+class TestRolePush:
+    async def test_pushes_roles_after_a_successful_live_report(self) -> None:
+        guild = _fake_guild()
+        api = AsyncMock()
+        bot = SimpleNamespace(api=api, configs=_configs(), guilds=[guild], fetch_guild=AsyncMock())
+        cog = _make_cog(api=api, bot=bot)
+
+        with patch.object(live_status, "build_guild_roles", return_value=[]) as mocked:
+            await cog._push(guild)
+
+        mocked.assert_called_once_with(guild)
+        api.put_guild_roles.assert_awaited_once_with(guild.id, [])
+
+    async def test_skips_roles_push_when_live_report_says_not_site_guild(self) -> None:
+        guild = _fake_guild()
+        api = AsyncMock()
+        api.report_discord_live.side_effect = NotFoundError(404, "not the site guild")
+        bot = SimpleNamespace(api=api, configs=_configs(), guilds=[guild], fetch_guild=AsyncMock())
+        cog = _make_cog(api=api, bot=bot)
+
+        await cog._push(guild)
+
+        api.put_guild_roles.assert_not_called()
+
+    async def test_roles_not_found_also_stops_pushing_to_that_guild(self) -> None:
+        guild = _fake_guild()
+        api = AsyncMock()
+        api.put_guild_roles.side_effect = NotFoundError(404, "not the site guild")
+        bot = SimpleNamespace(api=api, configs=_configs(), guilds=[guild], fetch_guild=AsyncMock())
+        cog = _make_cog(api=api, bot=bot)
+
+        await cog._push(guild)
+
+        assert guild.id in cog._not_site_guild_ids
+
+    async def test_other_roles_push_errors_do_not_crash(self) -> None:
+        guild = _fake_guild()
+        api = AsyncMock()
+        api.put_guild_roles.side_effect = APIError(500, "boom")
+        bot = SimpleNamespace(api=api, configs=_configs(), guilds=[guild], fetch_guild=AsyncMock())
+        cog = _make_cog(api=api, bot=bot)
+
+        await cog._push(guild)  # must not raise
 
         assert guild.id not in cog._not_site_guild_ids
 

@@ -19,6 +19,8 @@ from sidequest_common.schemas import (
     EventSummary,
     GuildConfigSchema,
     GuildConfigUpdate,
+    GuildRoleIn,
+    GuildRolesReplace,
     LeaderboardPage,
     LevelRoleSchema,
     LevelRoleUpsert,
@@ -345,3 +347,7 @@ class SideQuestAPI:
     async def report_discord_live(self, guild_id: int, report: DiscordLiveReport) -> None:
         """Push the current voice/presence snapshot for ``guild_id``."""
         await self._request("PUT", f"{self._guild(guild_id)}/live", body=report)
+
+    async def put_guild_roles(self, guild_id: int, roles: list[GuildRoleIn]) -> None:
+        """Replace ``guild_id``'s full role set (excluding ``@everyone``, dropped by the caller)."""
+        await self._request("PUT", f"{self._guild(guild_id)}/roles", body=GuildRolesReplace(roles=roles))

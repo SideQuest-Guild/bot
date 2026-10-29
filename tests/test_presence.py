@@ -23,6 +23,8 @@ def _event(
         starts_at=starts_at,
         ends_at=ends_at,
         size=None,
+        ep=10,
+        ep_override=None,
         status=status,
         notes=None,
         counts=EventCounts(tank=0, healer=0, dps=0, signed=0, tentative=0, absent=0, interested=0),

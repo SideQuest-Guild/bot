@@ -10,6 +10,7 @@ from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_a
 
 from sidequest_common.schemas import (
     ActivityAck,
+    ConfirmByDiscordRequest,
     DiscordEventReconcile,
     DiscordEventState,
     DiscordInterestReport,
@@ -26,6 +27,7 @@ from sidequest_common.schemas import (
     LevelRoleUpsert,
     MemberLevelSchema,
     MemberLink,
+    MemberListing,
     MemberProfileIn,
     MemberProfilesReplace,
     ModCaseCreate,
@@ -37,6 +39,8 @@ from sidequest_common.schemas import (
     RoleMenuSchema,
     RoleMenuUpdate,
     SetXPRequest,
+    SignupNoticeAck,
+    SignupNoticesPage,
     XPAwardResult,
 )
 
@@ -363,3 +367,32 @@ class SideQuestAPI:
             f"{self._guild(guild_id)}/member-profiles",
             body=MemberProfilesReplace(profiles=profiles, departed_ids=departed_ids),
         )
+
+    # --- Signup notices
+
+    async def list_signup_notices(self, guild_id: int) -> SignupNoticesPage:
+        """Members needing a new notice posted, and posted notices whose message is now stale."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/signup-notices")
+        return _parse(SignupNoticesPage.model_validate, data)
+
+    async def ack_signup_notice(self, guild_id: int, member_id: int, ack: SignupNoticeAck) -> None:
+        """Confirm the bot's message for ``member_id`` now reflects their current roster state."""
+        await self._request("POST", f"{self._guild(guild_id)}/signup-notices/{member_id}/ack", body=ack)
+
+    async def confirm_roster_by_discord(
+        self, guild_id: int, discord_id: int, request: ConfirmByDiscordRequest
+    ) -> MemberListing:
+        """Confirm a member on the roster, with the acting GM identified by Discord id."""
+        data = await self._request(
+            "PUT", f"{self._guild(guild_id)}/members/by-discord/{discord_id}/roster-confirmation", body=request
+        )
+        return _parse(MemberListing.model_validate, data)
+
+    async def unconfirm_roster_by_discord(
+        self, guild_id: int, discord_id: int, request: ConfirmByDiscordRequest
+    ) -> MemberListing:
+        """Clear a member's roster confirmation, with the acting GM identified by Discord id."""
+        data = await self._request(
+            "DELETE", f"{self._guild(guild_id)}/members/by-discord/{discord_id}/roster-confirmation", body=request
+        )
+        return _parse(MemberListing.model_validate, data)

@@ -10,6 +10,7 @@ from sidequest_bot import api_client
 from sidequest_bot.api_client import APIError, APIResponseShapeError, APIUnavailableError, NotFoundError, SideQuestAPI
 from sidequest_common.schemas import (
     CaseAction,
+    ConfirmByDiscordRequest,
     DiscordEventReconcile,
     DiscordEventState,
     DiscordEventStatus,
@@ -19,6 +20,7 @@ from sidequest_common.schemas import (
     MemberLink,
     MemberProfileIn,
     ModCaseCreate,
+    SignupNoticeAck,
 )
 
 BASE = "http://api.test"
@@ -251,3 +253,77 @@ async def test_put_member_profiles_puts_profiles_and_departed_ids(api: SideQuest
         ],
         "departed_ids": [2],
     }
+
+
+SIGNUP_NOTICES_URL = f"{BASE}/api/guilds/1/signup-notices"
+
+
+@respx.mock
+async def test_list_signup_notices_parses_pending_and_resolved(api: SideQuestAPI) -> None:
+    respx.get(SIGNUP_NOTICES_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "pending": [
+                    {
+                        "member_id": 1,
+                        "discord_id": "100",
+                        "display_name": "Newbie",
+                        "username": "newbie",
+                        "avatar_hash": None,
+                        "battletag": None,
+                        "roster_confirmed": False,
+                        "created_at": "2026-01-01T00:00:00Z",
+                    }
+                ],
+                "resolved": [
+                    {
+                        "member_id": 2,
+                        "discord_id": "200",
+                        "display_name": "Confirmed",
+                        "channel_id": "555",
+                        "message_id": "666",
+                        "confirmed_by": "Officer",
+                    }
+                ],
+            },
+        )
+    )
+    page = await api.list_signup_notices(1)
+    assert [m.member_id for m in page.pending] == [1]
+    assert [m.member_id for m in page.resolved] == [2]
+
+
+@respx.mock
+async def test_ack_signup_notice_posts_channel_and_message(api: SideQuestAPI) -> None:
+    route = respx.post(f"{SIGNUP_NOTICES_URL}/1/ack").mock(return_value=httpx.Response(204))
+    await api.ack_signup_notice(1, 1, SignupNoticeAck(channel_id=555, message_id=666))
+    assert route.call_count == 1
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"channel_id": 555, "message_id": 666}
+
+
+@respx.mock
+async def test_confirm_roster_by_discord_puts_actor(api: SideQuestAPI) -> None:
+    route = respx.put(f"{BASE}/api/guilds/1/members/by-discord/100/roster-confirmation").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 1,
+                "username": "newbie",
+                "display_name": "Newbie",
+                "avatar_url": None,
+                "is_guild_member": True,
+                "is_officer": False,
+                "battletag": None,
+                "roster_confirmed": True,
+                "last_login_at": None,
+            },
+        )
+    )
+    request = ConfirmByDiscordRequest(actor_discord_id="200", actor_name="GM")
+    listing = await api.confirm_roster_by_discord(1, 100, request)
+    assert route.call_count == 1
+    assert listing.roster_confirmed is True
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"actor_discord_id": "200", "actor_name": "GM"}

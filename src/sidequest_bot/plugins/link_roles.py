@@ -8,8 +8,9 @@ get it on join so they only see the sign-in channel, and it's removed the moment
 holds a higher rank. ``on_member_join``/screening-clear apply the same plan immediately so a new member doesn't
 wait up to a minute for their role. The same loop also applies every pending Discord role reset
 (``GET .../role-resets``): a member who deleted their site account gets every role the bot can manage stripped and
-the gate role (re)granted immediately, landing them back behind #sign-the-ledger. The bot is the only thing that
-talks to Discord about these roles; the API only reports who is linked/confirmed/pending a reset.
+the gate role (re)granted immediately, landing them back behind #sign-the-ledger. The moment a member is granted
+the site link role, they're DMed a one-time welcome (``guest_welcome.send_guest_welcome_dm``). The bot is the only
+thing that talks to Discord about these roles; the API only reports who is linked/confirmed/pending a reset.
 """
 
 import logging
@@ -22,6 +23,7 @@ from discord.ext import commands, tasks
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.roles import grant_block_reason
+from sidequest_bot.plugins.guest_welcome import send_guest_welcome_dm
 from sidequest_bot.plugins.welcome import autorole_block_reason, completed_screening
 from sidequest_common.schemas import GuildConfigUpdate
 
@@ -216,6 +218,12 @@ class LinkRolesCog(commands.Cog):
                 logger.warning(
                     "Failed to grant link role %s to %s in guild %s", role_id, member.id, guild.id, exc_info=True
                 )
+            else:
+                if role_id == config.linked_role_id:
+                    # The gate -> guest transition: the member just signed in for the first time. Firing the
+                    # welcome DM off the successful grant (rather than a stored flag) makes it idempotent for
+                    # free - once granted, plan_role_changes never lists this role in to_add again.
+                    await send_guest_welcome_dm(member)
         remove_roles = [role for role_id in to_remove if (role := guild.get_role(role_id)) is not None]
         if remove_roles:
             try:

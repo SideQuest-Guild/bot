@@ -66,6 +66,8 @@ def _fake_member(
     member.roles = roles if roles is not None else [MagicMock(id=role_id) for role_id in (role_ids or [])]
     member.add_roles = AsyncMock()
     member.remove_roles = AsyncMock()
+    member.send = AsyncMock()
+    member.guild = SimpleNamespace(id=42, text_channels=[])
     return member
 
 
@@ -488,6 +490,65 @@ class TestSyncGuild:
         await cog._sync_guild(guild)
 
         member.add_roles.assert_not_awaited()
+        member.remove_roles.assert_not_awaited()
+
+
+class TestGuestWelcomeDm:
+    """The gate -> guest transition (granting linked_role_id) DMs a one-time welcome."""
+
+    async def test_sends_dm_once_on_grant_not_on_later_tick(self) -> None:
+        site_role = _fake_role(100)
+        guild = _fake_guild(roles=[site_role])
+        member = _fake_member(1, role_ids=[])
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=100, battlenet_role_id=None)
+        api = AsyncMock()
+        api.list_member_links.return_value = [MemberLink(discord_id=1, battlenet_linked=False)]
+        cog = _make_cog(api=api, configs=configs)
+
+        with patch.object(link_roles_module, "send_guest_welcome_dm", new_callable=AsyncMock) as send_dm:
+            await cog._sync_guild(guild)
+            send_dm.assert_awaited_once_with(member)
+
+            # Discord would now actually hold the role, so the next tick's member_role_ids reflects that and
+            # plan_role_changes no longer lists it in to_add - no stored "already welcomed" flag needed.
+            member.roles = [site_role]
+            await cog._sync_guild(guild)
+            assert send_dm.await_count == 1
+
+    async def test_not_sent_for_other_role_grants(self) -> None:
+        bnet_role = _fake_role(200)
+        guild = _fake_guild(roles=[bnet_role])
+        member = _fake_member(1, role_ids=[])
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=None, battlenet_role_id=200)
+        api = AsyncMock()
+        api.list_member_links.return_value = [MemberLink(discord_id=1, battlenet_linked=True)]
+        cog = _make_cog(api=api, configs=configs)
+
+        with patch.object(link_roles_module, "send_guest_welcome_dm", new_callable=AsyncMock) as send_dm:
+            await cog._sync_guild(guild)
+            send_dm.assert_not_awaited()
+
+    async def test_forbidden_dm_does_not_stop_role_change(self) -> None:
+        site_role = _fake_role(100)
+        bnet_role = _fake_role(200)
+        guild = _fake_guild(roles=[site_role, bnet_role])
+        member = _fake_member(1, role_ids=[])
+        member.send = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "Cannot send messages"))
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=100, battlenet_role_id=200)
+        api = AsyncMock()
+        api.list_member_links.return_value = [MemberLink(discord_id=1, battlenet_linked=True)]
+        cog = _make_cog(api=api, configs=configs)
+
+        await cog._sync_guild(guild)
+
+        member.add_roles.assert_any_await(site_role, reason="Signed in on sidequest-guild.com")
+        member.add_roles.assert_any_await(bnet_role, reason="Linked Battle.net")
         member.remove_roles.assert_not_awaited()
 
 

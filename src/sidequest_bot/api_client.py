@@ -38,6 +38,7 @@ from sidequest_common.schemas import (
     RoleMenuOptionUpsert,
     RoleMenuSchema,
     RoleMenuUpdate,
+    RoleResetCandidate,
     SetXPRequest,
     SignupNoticeAck,
     SignupNoticesPage,
@@ -60,6 +61,7 @@ _CASES = TypeAdapter(list[ModCaseSchema])
 _ROLE_MENUS = TypeAdapter(list[RoleMenuSchema])
 _EVENTS = TypeAdapter(list[EventSummary])
 _MEMBER_LINKS = TypeAdapter(list[MemberLink])
+_ROLE_RESETS = TypeAdapter(list[RoleResetCandidate])
 
 
 class APIError(Exception):
@@ -396,3 +398,14 @@ class SideQuestAPI:
             "DELETE", f"{self._guild(guild_id)}/members/by-discord/{discord_id}/roster-confirmation", body=request
         )
         return _parse(MemberListing.model_validate, data)
+
+    # --- Role resets
+
+    async def list_role_resets(self, guild_id: int) -> list[RoleResetCandidate]:
+        """Pending Discord role resets owed after a site account deletion, oldest first, capped at 50."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/role-resets")
+        return _parse(_ROLE_RESETS.validate_python, data)
+
+    async def ack_role_reset(self, guild_id: int, reset_id: UUID) -> None:
+        """Confirm the bot stripped this member's roles (or found them no longer in the guild)."""
+        await self._request("POST", f"{self._guild(guild_id)}/role-resets/{reset_id}/ack")

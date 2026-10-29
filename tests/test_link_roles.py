@@ -1,16 +1,18 @@
 """Unit tests for the link-roles plugin: plan_role_changes, the sync loop/listeners, and the /linkroles group."""
 
 import logging
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from uuid import uuid4
 
 import discord
 import pytest
 
 from sidequest_bot.api_client import APIError, APIResponseShapeError, NotFoundError
 from sidequest_bot.plugins import link_roles as link_roles_module
-from sidequest_bot.plugins.link_roles import LinkRolesCog, plan_role_changes
-from sidequest_common.schemas import MemberLink
+from sidequest_bot.plugins.link_roles import LinkRolesCog, plan_role_changes, plan_role_strip
+from sidequest_common.schemas import MemberLink, RoleResetCandidate
 
 
 def _config(
@@ -67,9 +69,18 @@ def _fake_member(
     return member
 
 
+def _fake_reset(discord_id: int, *, reset_id=None, requested_at: datetime | None = None) -> RoleResetCandidate:
+    return RoleResetCandidate(
+        id=reset_id or uuid4(), discord_id=discord_id, requested_at=requested_at or datetime.now(UTC)
+    )
+
+
 def _make_cog(*, api: object | None = None, configs: object | None = None, guilds: list[object] | None = None):
+    api = api or AsyncMock()
+    if not isinstance(api.list_role_resets.return_value, list):
+        api.list_role_resets.return_value = []
     cog = LinkRolesCog.__new__(LinkRolesCog)
-    cog.bot = SimpleNamespace(api=api or AsyncMock(), configs=configs or AsyncMock(), guilds=guilds or [])
+    cog.bot = SimpleNamespace(api=api, configs=configs or AsyncMock(), guilds=guilds or [])
     cog._not_site_guild_ids = set()
     cog._warned_role_ids = set()
     return cog
@@ -243,6 +254,31 @@ class TestPlanRoleChanges:
         )
         assert to_add == []
         assert to_remove == []
+
+
+class TestPlanRoleStrip:
+    """Pure: only touches roles the bot can manage, and never the gate role."""
+
+    def test_removes_every_assignable_role(self) -> None:
+        roles = [_fake_role(1), _fake_role(2)]
+        assert sorted(plan_role_strip(roles, gate_role_id=None)) == [1, 2]
+
+    def test_keeps_everyone_managed_and_above_bot_roles(self) -> None:
+        """Roles the bot can't manage report ``is_assignable() == False`` and must never be touched."""
+        roles = [_fake_role(1, assignable=False), _fake_role(2)]
+        assert plan_role_strip(roles, gate_role_id=None) == [2]
+
+    def test_keeps_gate_role_out_of_the_removal_list(self) -> None:
+        gate_role = _fake_role(300)
+        other_role = _fake_role(100)
+        assert sorted(plan_role_strip([gate_role, other_role], gate_role_id=300)) == [100]
+
+    def test_no_gate_role_configured_strips_everything_assignable(self) -> None:
+        roles = [_fake_role(1), _fake_role(2), _fake_role(3, assignable=False)]
+        assert sorted(plan_role_strip(roles, gate_role_id=None)) == [1, 2]
+
+    def test_empty_roles_returns_empty(self) -> None:
+        assert plan_role_strip([], gate_role_id=300) == []
 
 
 class TestSyncGuild:
@@ -487,6 +523,22 @@ class TestSyncLoop:
 
         assert guild.id not in cog._not_site_guild_ids
 
+    async def test_role_resets_404_mid_deploy_keeps_link_roles_running(self) -> None:
+        """New bot, old API: member-links answers but role-resets 404s. That must not switch the guild off."""
+        guild = _fake_guild()
+        configs = AsyncMock()
+        configs.get.return_value = _config(gate_role_id=300)
+        api = AsyncMock()
+        api.list_member_links.return_value = []
+        api.list_role_resets.side_effect = NotFoundError(404, "Not Found")
+        cog = _make_cog(api=api, configs=configs, guilds=[guild])
+
+        await cog._sync_loop.coro(cog)
+        await cog._sync_loop.coro(cog)
+
+        assert guild.id not in cog._not_site_guild_ids
+        assert api.list_role_resets.await_count == 2
+
 
 class TestListeners:
     async def test_on_member_join_skips_bot_members(self) -> None:
@@ -642,3 +694,89 @@ class TestLinkrolesGroup:
         await LinkRolesCog.linkroles_roster.callback(cog, interaction, None)
         update_call = interaction.client.configs.update.await_args
         assert update_call.args[1].roster_role_id is None
+
+
+class TestProcessRoleResets:
+    """Role resets owed after a site account deletion: strip manageable roles, re-gate, ack."""
+
+    async def test_no_pending_resets_does_nothing(self) -> None:
+        api = AsyncMock()
+        api.list_role_resets.return_value = []
+        cog = _make_cog(api=api)
+        guild = _fake_guild()
+
+        await cog._process_role_resets(guild, _config())
+
+        api.ack_role_reset.assert_not_awaited()
+
+    async def test_strips_manageable_roles_and_grants_gate_role(self) -> None:
+        gate_role = _fake_role(300)
+        kept_role = _fake_role(400, assignable=False)
+        stripped_role = _fake_role(100)
+        guild = _fake_guild(roles=[gate_role, kept_role, stripped_role])
+        member = _fake_member(1, roles=[stripped_role, kept_role])
+        guild.get_member = Mock(return_value=member)
+        reset = _fake_reset(1)
+        api = AsyncMock()
+        api.list_role_resets.return_value = [reset]
+        cog = _make_cog(api=api)
+
+        await cog._process_role_resets(guild, _config(gate_role_id=300))
+
+        member.remove_roles.assert_awaited_once_with(stripped_role, reason="Site account deleted")
+        member.add_roles.assert_awaited_once_with(gate_role, reason="Site account deleted")
+        api.ack_role_reset.assert_awaited_once_with(guild.id, reset.id)
+
+    async def test_member_already_gone_is_acked_without_role_changes(self) -> None:
+        guild = _fake_guild()
+        guild.get_member = Mock(return_value=None)
+        reset = _fake_reset(1)
+        api = AsyncMock()
+        api.list_role_resets.return_value = [reset]
+        cog = _make_cog(api=api)
+
+        await cog._process_role_resets(guild, _config(gate_role_id=None))
+
+        api.ack_role_reset.assert_awaited_once_with(guild.id, reset.id)
+
+    async def test_discord_error_on_removal_skips_ack(self) -> None:
+        stripped_role = _fake_role(100)
+        guild = _fake_guild(roles=[stripped_role])
+        member = _fake_member(1, roles=[stripped_role])
+        member.remove_roles.side_effect = discord.HTTPException(MagicMock(status=500), "boom")
+        guild.get_member = Mock(return_value=member)
+        reset = _fake_reset(1)
+        api = AsyncMock()
+        api.list_role_resets.return_value = [reset]
+        cog = _make_cog(api=api)
+
+        await cog._process_role_resets(guild, _config(gate_role_id=None))
+
+        api.ack_role_reset.assert_not_awaited()
+
+    async def test_gate_role_missing_still_strips_but_skips_grant(self) -> None:
+        stripped_role = _fake_role(100)
+        guild = _fake_guild(roles=[stripped_role])  # gate role 300 is not registered on the guild
+        member = _fake_member(1, roles=[stripped_role])
+        guild.get_member = Mock(return_value=member)
+        reset = _fake_reset(1)
+        api = AsyncMock()
+        api.list_role_resets.return_value = [reset]
+        cog = _make_cog(api=api)
+
+        await cog._process_role_resets(guild, _config(gate_role_id=300))
+
+        member.remove_roles.assert_awaited_once_with(stripped_role, reason="Site account deleted")
+        member.add_roles.assert_not_awaited()
+        api.ack_role_reset.assert_awaited_once_with(guild.id, reset.id)
+
+    async def test_ack_failure_is_caught_not_raised(self) -> None:
+        guild = _fake_guild()
+        guild.get_member = Mock(return_value=None)
+        reset = _fake_reset(1)
+        api = AsyncMock()
+        api.list_role_resets.return_value = [reset]
+        api.ack_role_reset.side_effect = APIError(500, "boom")
+        cog = _make_cog(api=api)
+
+        await cog._process_role_resets(guild, _config(gate_role_id=None))

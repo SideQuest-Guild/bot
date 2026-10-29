@@ -6,9 +6,10 @@ roles against that. The gate role (**At the Gate**) is wanted exactly while a me
 get it on join so they only see the sign-in channel, and it's removed the moment they sign in. The roster role
 (**New Arrival**) is wanted once an officer confirms the member, but is never re-granted to a member who already
 holds a higher rank. ``on_member_join``/screening-clear apply the same plan immediately so a new member doesn't
-wait up to a minute for their role. The bot is the only thing that talks to Discord about these roles; the API
-only reports who is linked/confirmed. See ``local://link-roles-contract.md`` (read at implementation time) for the
-full wire contract.
+wait up to a minute for their role. The same loop also applies every pending Discord role reset
+(``GET .../role-resets``): a member who deleted their site account gets every role the bot can manage stripped and
+the gate role (re)granted immediately, landing them back behind #sign-the-ledger. The bot is the only thing that
+talks to Discord about these roles; the API only reports who is linked/confirmed/pending a reset.
 """
 
 import logging
@@ -25,7 +26,9 @@ from sidequest_bot.plugins.welcome import autorole_block_reason, completed_scree
 from sidequest_common.schemas import GuildConfigUpdate
 
 if TYPE_CHECKING:
-    from sidequest_common.schemas import GuildConfigSchema, MemberLink
+    from uuid import UUID
+
+    from sidequest_common.schemas import GuildConfigSchema, MemberLink, RoleResetCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,17 @@ def plan_role_changes(
     return to_add, to_remove
 
 
+def plan_role_strip(member_roles: list[discord.Role], *, gate_role_id: int | None) -> list[int]:
+    """Role ids to remove from a member whose site account was deleted.
+
+    Every role the bot can manage, except the gate role itself (it's kept if already held, or granted
+    separately right after this if not, so it never needs to appear here). Keeps ``@everyone``, managed/
+    integration roles, and anything at or above the bot's top role untouched too — Discord would reject
+    touching those anyway, so this is exactly ``discord.Role.is_assignable()``.
+    """
+    return [role.id for role in member_roles if role.is_assignable() and role.id != gate_role_id]
+
+
 class LinkRolesCog(commands.Cog):
     """Periodic role sync plus the join/screening listeners and the ``/linkroles`` admin group."""
 
@@ -144,6 +158,7 @@ class LinkRolesCog(commands.Cog):
             if member.bot:
                 continue
             await self._apply_member(guild, member, config, links_by_discord_id)
+        await self._process_role_resets(guild, config)
 
     async def _fetch_links(self, guild_id: int) -> dict[int, MemberLink]:
         links: list[MemberLink] = await self.bot.api.list_member_links(guild_id)
@@ -224,6 +239,55 @@ class LinkRolesCog(commands.Cog):
             return None
         self._warned_role_ids.discard(key)
         return role
+
+    # --- Role resets (site account deletion) -------------------------------------------------------------------
+
+    async def _process_role_resets(self, guild: discord.Guild, config: GuildConfigSchema) -> None:
+        """Strip every manageable role from, and re-gate, each member with a pending role reset.
+
+        A pending reset is a member who deleted their site account via ``DELETE /api/me``: they keep nothing but
+        the gate role, (re)granted right here rather than waiting for the next tick. Other API errors go to
+        ``_sync_loop``, which retries next tick.
+        """
+        try:
+            resets: list[RoleResetCandidate] = await self.bot.api.list_role_resets(guild.id)
+        except NotFoundError:
+            # member-links already answered for this guild, so this is an API from before the route, mid rolling
+            # deploy, not "not the site guild". Letting it reach _sync_loop would switch link roles off for good.
+            logger.warning("Role resets aren't available from the API yet for guild %s", guild.id)
+            return
+        if not resets:
+            return
+        gate_role = (
+            self._resolve_grantable_role(guild, config.gate_role_id) if config.gate_role_id is not None else None
+        )
+        for reset in resets:
+            await self._process_role_reset(guild, reset, gate_role)
+
+    async def _process_role_reset(
+        self, guild: discord.Guild, reset: RoleResetCandidate, gate_role: discord.Role | None
+    ) -> None:
+        member = guild.get_member(reset.discord_id)
+        if member is None:
+            await self._ack_role_reset(guild.id, reset.id)
+            return
+        remove_ids = plan_role_strip(member.roles, gate_role_id=gate_role.id if gate_role is not None else None)
+        remove_roles = [role for role_id in remove_ids if (role := guild.get_role(role_id)) is not None]
+        try:
+            if remove_roles:
+                await member.remove_roles(*remove_roles, reason="Site account deleted")
+            if gate_role is not None:
+                await member.add_roles(gate_role, reason="Site account deleted")
+        except discord.HTTPException:
+            logger.warning("Failed to reset roles for %s in guild %s", reset.discord_id, guild.id, exc_info=True)
+            return
+        await self._ack_role_reset(guild.id, reset.id)
+
+    async def _ack_role_reset(self, guild_id: int, reset_id: UUID) -> None:
+        try:
+            await self.bot.api.ack_role_reset(guild_id, reset_id)
+        except APIError:
+            logger.warning("Failed to ack role reset %s in guild %s", reset_id, guild_id, exc_info=True)
 
     # --- Join / screening listeners ---------------------------------------------------------------------------
 

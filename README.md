@@ -24,6 +24,8 @@ lives there.
 - **Away on a Quest.** Mark away dates on the website and you hold this role for those days.
 - **The weekly board.** Every Monday at 10:00 Central the bot posts the week's events in one message. A week with no
   events gets no message.
+- **WoW: Forever news.** Every five minutes the bot checks Blizzard's own forum posts about WoW: Forever and
+  Wowhead's WoW: Forever news, and posts each new one in the feed channel with a link to the full post.
 - **Class halls.** Pick a class in `#choose-your-class` and you join that class's post in `#class-halls`.
 - **Commands for everyone:** `/rank [member]` shows a level and `/leaderboard` shows the top of the server.
 
@@ -38,6 +40,7 @@ Server Settings, Integrations. Settings are saved in the API and apply at once.
 | `/weeklyboard channel`, `/weeklyboard preview` | Manage Server | Picks the weekly board's channel, or shows you this week's board. |
 | `/badges channel`, `/badges sync` | Manage Server | Picks where badges are announced, or checks for new badges now. |
 | `/announcements channel` | Manage Server | Picks where announcements from the game and the website are posted. |
+| `/foreverfeed channel` | Manage Server | Picks where WoW: Forever news from Blizzard and Wowhead is posted. A new channel gets the latest three first. |
 | `/signups channel` | Manage Server | Picks where new sign-ins are posted, each with an **Approve** button for Quest Masters. |
 | `/guestwelcome post <channel>` | Manage Server | Posts and pins the **Start here** button. |
 | `/linkroles site`, `battlenet`, `gate`, `roster` | Manage Server | Picks the four roles that come from the website. |

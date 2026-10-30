@@ -14,6 +14,8 @@ class Colors:
     RED = discord.Colour(0xE74C3C)  # destructive: deletes, bans, leaves
     SLATE = discord.Colour(0x607D8B)  # neutral / edits
     SITE_GOLD = discord.Colour(0xD8AB5C)  # sidequest-guild.com's gold: public panels such as role menus
+    BLIZZARD_BLUE = discord.Colour(0x148EFF)  # Blizzard blue posts in the WoW: Forever feed
+    WOWHEAD_RED = discord.Colour(0xC41F1F)  # Wowhead articles in the WoW: Forever feed
 
 
 def make_embed(

@@ -1,0 +1,43 @@
+name: Release
+
+# A v* tag publishes a GitHub release. Its notes are that version's section of the changelog, written by git-cliff
+# from the commit subjects (cliff.toml). The docs site reads CHANGELOG.md on its next build.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git-cliff reads every tag
+          persist-credentials: false
+
+      - name: Write release notes
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: ${{ runner.temp }}/notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          TITLE: Bot
+          NOTES: ${{ runner.temp }}/notes.md
+        run: gh release create "$TAG" --verify-tag --title "$TITLE $TAG" --notes-file "$NOTES"

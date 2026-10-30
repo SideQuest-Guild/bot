@@ -452,21 +452,21 @@ class SideQuestAPI:
         """Confirm the bot's message for ``member_id`` now reflects their current roster state."""
         await self._request("POST", f"{self._guild(guild_id)}/signup-notices/{member_id}/ack", body=ack)
 
-    async def confirm_roster_by_discord(
-        self, guild_id: int, discord_id: int, request: ConfirmByDiscordRequest
+    async def confirm_roster_from_notice(
+        self, guild_id: int, member_id: int, request: ConfirmByDiscordRequest
     ) -> MemberListing:
-        """Confirm a member on the roster, with the acting GM identified by Discord id."""
+        """Confirm site member ``member_id`` on the roster, with the acting GM identified by Discord id."""
         data = await self._request(
-            "PUT", f"{self._guild(guild_id)}/members/by-discord/{discord_id}/roster-confirmation", body=request
+            "PUT", f"{self._guild(guild_id)}/signup-notices/{member_id}/roster-confirmation", body=request
         )
         return _parse(MemberListing.model_validate, data)
 
-    async def unconfirm_roster_by_discord(
-        self, guild_id: int, discord_id: int, request: ConfirmByDiscordRequest
+    async def unconfirm_roster_from_notice(
+        self, guild_id: int, member_id: int, request: ConfirmByDiscordRequest
     ) -> MemberListing:
-        """Clear a member's roster confirmation, with the acting GM identified by Discord id."""
+        """Clear site member ``member_id``'s roster confirmation, with the acting GM identified by Discord id."""
         data = await self._request(
-            "DELETE", f"{self._guild(guild_id)}/members/by-discord/{discord_id}/roster-confirmation", body=request
+            "DELETE", f"{self._guild(guild_id)}/signup-notices/{member_id}/roster-confirmation", body=request
         )
         return _parse(MemberListing.model_validate, data)
 

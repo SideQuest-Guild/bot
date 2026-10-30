@@ -1,8 +1,13 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
 import discord
 
+from sidequest_bot.plugins import signup_notices
 from sidequest_bot.plugins.signup_notices import (
     GUEST_STATUS_TEXT,
     STATUS_FIELD_NAME,
+    SignupApproveButton,
     apply_approval_status,
     avatar_url,
     build_custom_id,
@@ -122,3 +127,29 @@ class TestBuildNoticeView:
         view = build_notice_view(1, "https://sidequest-guild.com/officers/#members?member=1", approved=True)
         approve = next(item for item in view.children if getattr(item, "custom_id", None) == build_custom_id(1))
         assert approve.item.disabled is True
+
+
+class TestApproveCallback:
+    async def test_confirms_the_notice_member_not_the_clicker(self) -> None:
+        gm_role_id = 10
+        clicker = Mock(spec=discord.Member)
+        clicker.id = 9001
+        clicker.display_name = "Coffee"
+        clicker.mention = "<@9001>"
+        clicker.roles = [SimpleNamespace(id=gm_role_id)]
+        interaction = Mock()
+        interaction.guild = SimpleNamespace(id=42)
+        interaction.user = clicker
+        interaction.message = None
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        interaction.client.api.confirm_roster_from_notice = AsyncMock()
+        settings = SimpleNamespace(GM_ROLE_IDS=[gm_role_id], BASE_URL="https://example.test")
+
+        with patch.object(signup_notices, "_web_settings", return_value=settings):
+            await SignupApproveButton(77).callback(interaction)
+
+        interaction.client.api.confirm_roster_from_notice.assert_awaited_once()
+        guild_id, member_id, request = interaction.client.api.confirm_roster_from_notice.await_args.args
+        assert (guild_id, member_id) == (42, 77)
+        assert request.actor_discord_id == "9001"

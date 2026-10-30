@@ -5,8 +5,9 @@ Every 60 s, for each guild with ``signup_notice_channel_id`` configured: pull me
 (``sq:sn:approve:<member_id>``) and a **More info** link button to the member's detail on the Officers page, then
 ack each post so it isn't posted again. Also pulls posted notices that were confirmed since (e.g. on the site) and
 edits their message to say so, so officers reading the channel never see a stale "Guest" notice for someone already
-on the roster. Clicking Approve re-checks the clicker holds a ``WEB_GM_ROLE_IDS`` role, then calls the same
-roster-confirmation the GM console uses (identified by the clicker's Discord id), and edits the message in place.
+on the roster. Clicking Approve re-checks the clicker holds a ``WEB_GM_ROLE_IDS`` role, then confirms the notice's
+member (by site member id) through the same roster-confirmation the GM console uses, with the clicker's Discord id as
+the acting GM, and edits the message in place.
 """
 
 import logging
@@ -145,7 +146,7 @@ class SignupApproveButton(discord.ui.DynamicItem[discord.ui.Button], template=CU
             actor_discord_id=str(interaction.user.id), actor_name=interaction.user.display_name
         )
         try:
-            await bot.api.confirm_roster_by_discord(guild.id, interaction.user.id, request)
+            await bot.api.confirm_roster_from_notice(guild.id, self.member_id, request)
         except NotFoundError:
             await interaction.followup.send("That signup record no longer exists.", ephemeral=True)
             return

@@ -313,8 +313,8 @@ async def test_ack_signup_notice_posts_channel_and_message(api: SideQuestAPI) ->
 
 
 @respx.mock
-async def test_confirm_roster_by_discord_puts_actor(api: SideQuestAPI) -> None:
-    route = respx.put(f"{BASE}/api/guilds/1/members/by-discord/100/roster-confirmation").mock(
+async def test_confirm_roster_from_notice_puts_actor(api: SideQuestAPI) -> None:
+    route = respx.put(f"{SIGNUP_NOTICES_URL}/100/roster-confirmation").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -331,7 +331,7 @@ async def test_confirm_roster_by_discord_puts_actor(api: SideQuestAPI) -> None:
         )
     )
     request = ConfirmByDiscordRequest(actor_discord_id="200", actor_name="GM")
-    listing = await api.confirm_roster_by_discord(1, 100, request)
+    listing = await api.confirm_roster_from_notice(1, 100, request)
     assert route.call_count == 1
     assert listing.roster_confirmed is True
     sent = json.loads(route.calls.last.request.content)

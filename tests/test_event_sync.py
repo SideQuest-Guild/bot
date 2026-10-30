@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 from datetime import UTC, datetime
+from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 from uuid import UUID, uuid4
@@ -13,18 +14,41 @@ import pytest
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.plugins.event_sync import (
+    ChangeSignupDetailsButton,
+    EventSignupButton,
     EventSyncCog,
+    SignupDetailsModal,
+    _confirmation_text,
+    _EnterDetailsView,
     _find_tag,
+    _guess_class_from_roles,
+    _handle_signup_click,
+    _send_sign_in_prompt,
+    _submit_signup,
     build_activity_line,
+    build_change_custom_id,
+    build_counts_line,
+    build_signup_custom_id,
+    build_signup_view,
     build_starter_message,
     event_state,
+    parse_change_custom_id,
+    parse_signup_custom_id,
 )
 from sidequest_common.schemas import (
     DiscordEventPush,
     DiscordEventState,
     DiscordEventStatus,
+    EventCounts,
     EventKind,
+    Signup,
     SignupActivity,
+    SignupByDiscord,
+    SignupDefaults,
+    SignupMember,
+    SignupRole,
+    SignupStatus,
+    WowClass,
 )
 
 
@@ -72,12 +96,14 @@ def _fake_push(
     action: str = "upsert",
     starts_at: datetime = datetime(2099, 1, 1, tzinfo=UTC),
     ends_at: datetime = datetime(2099, 1, 1, 3, tzinfo=UTC),
+    counts: EventCounts | None = None,
 ) -> DiscordEventPush:
     return DiscordEventPush(
         event_id=event_id or uuid4(),
         discord_event_id=discord_event_id,
         thread_id=thread_id,
         kind=kind,
+        counts=counts or EventCounts(tank=0, healer=0, dps=0, signed=0, tentative=0, absent=0, interested=0),
         action=action,
         name="Raid Night",
         title="Raid Night",
@@ -654,6 +680,55 @@ class TestEnsureCancelOrCompleteThread:
         assert await cog._ensure_cancel_or_complete_thread(forum, push) is None
 
 
+class TestUpgradeExistingForumThreads:
+    """Finding 1: an old worker can ack a starter edit without buttons, so the hash-driven push never retries it."""
+
+    async def test_adds_the_view_to_a_thread_missing_sign_up_buttons(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        forum = _fake_forum()
+        event_id = uuid4()
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 42
+        starter = MagicMock(
+            content=f"Sign up: https://sidequest-guild.com/events/detail/?id={event_id}\n", components=[]
+        )
+        starter.edit = AsyncMock()
+        thread.fetch_message = AsyncMock(return_value=starter)
+        forum.threads = [thread]
+        cog = _make_cog(api=AsyncMock(), guilds=[forum.guild], forum_channel_id=900)
+        forum.guild.get_channel.return_value = forum
+
+        await cog._upgrade_existing_forum_threads(forum.guild)
+
+        starter.edit.assert_awaited_once()
+        view = starter.edit.await_args.kwargs["view"]
+        assert any(getattr(item, "custom_id", "").startswith(f"sq:ev:{event_id}:") for item in view.children)
+
+    async def test_leaves_a_thread_that_already_has_buttons_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        forum = _fake_forum()
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 42
+        starter = MagicMock(
+            content="Sign up: https://sidequest-guild.com/events/detail/?id=not-checked", components=[MagicMock()]
+        )
+        starter.edit = AsyncMock()
+        thread.fetch_message = AsyncMock(return_value=starter)
+        forum.threads = [thread]
+        cog = _make_cog(api=AsyncMock(), guilds=[forum.guild], forum_channel_id=900)
+        forum.guild.get_channel.return_value = forum
+
+        await cog._upgrade_existing_forum_threads(forum.guild)
+
+        starter.edit.assert_not_awaited()
+
+    async def test_no_forum_configured_does_nothing(self) -> None:
+        guild = _fake_guild()
+        cog = _make_cog(api=AsyncMock(), guilds=[guild], forum_channel_id=None)
+
+        await cog._upgrade_existing_forum_threads(guild)  # must not raise; no get_channel call needed
+
+
 class TestCloseForumThreadForDeletion:
     async def test_posts_removal_notice_and_archives(self) -> None:
         guild = _fake_guild()
@@ -783,3 +858,310 @@ class TestDebounceInterest:
         cog._debounce_interest(event)
 
         assert 1 not in cog._interest_tasks
+
+
+class TestBuildCountsLine:
+    def test_role_kind_breaks_down_by_role(self) -> None:
+        push = _fake_push(
+            kind=EventKind.RAID,
+            counts=EventCounts(tank=2, healer=3, dps=7, signed=12, tentative=1, absent=2, interested=0),
+        )
+        assert build_counts_line(push) == "Going 12 (2 tanks · 3 healers · 7 DPS) · Maybe 1 · Can't 2"
+
+    def test_non_role_kind_shows_bare_total(self) -> None:
+        push = _fake_push(
+            kind=EventKind.SOCIAL,
+            counts=EventCounts(tank=0, healer=0, dps=0, signed=5, tentative=2, absent=1, interested=0),
+        )
+        assert build_counts_line(push) == "Going 5 · Maybe 2 · Can't 1"
+
+
+class TestSignupCustomId:
+    def test_round_trips(self) -> None:
+        event_id = uuid4()
+        custom_id = build_signup_custom_id(event_id, SignupStatus.TENTATIVE)
+        assert custom_id == f"sq:ev:{event_id}:tentative"
+        assert parse_signup_custom_id(custom_id) == (event_id, SignupStatus.TENTATIVE)
+
+    def test_rejects_unrelated_ids(self) -> None:
+        assert parse_signup_custom_id("sq:rm:some:thing") is None
+
+
+class TestChangeCustomId:
+    def test_round_trips(self) -> None:
+        event_id = uuid4()
+        custom_id = build_change_custom_id(event_id, SignupStatus.SIGNED)
+        assert custom_id == f"sq:evc:{event_id}:signed"
+        assert parse_change_custom_id(custom_id) == (event_id, SignupStatus.SIGNED)
+
+    def test_rejects_unrelated_ids(self) -> None:
+        assert parse_change_custom_id("sq:ev:not-a-uuid:signed") is None
+
+
+class TestBuildSignupView:
+    def test_has_three_persistent_buttons(self) -> None:
+        view = build_signup_view(uuid4())
+        assert view.timeout is None
+        assert len(view.children) == 3
+        labels = {button.item.label for button in view.children}
+        assert labels == {"Going", "Maybe", "Can't"}
+
+
+class TestGuessClassFromRoles:
+    def test_matches_a_class_role_by_name(self) -> None:
+        member = SimpleNamespace(roles=[SimpleNamespace(name="Warrior"), SimpleNamespace(name="Raider")])
+        assert _guess_class_from_roles(member) == WowClass.WARRIOR
+
+    def test_no_match_returns_none(self) -> None:
+        member = SimpleNamespace(roles=[SimpleNamespace(name="Raider")])
+        assert _guess_class_from_roles(member) is None
+
+
+class TestConfirmationText:
+    def test_role_kind_with_details(self) -> None:
+        signup = Signup(
+            id=uuid4(),
+            member=SignupMember(display_name="Coffee", avatar_url=None),
+            character="Oakenshield",
+            wow_class=WowClass.WARRIOR,
+            role=SignupRole.TANK,
+            status=SignupStatus.SIGNED,
+            comment=None,
+            group=None,
+            bench=False,
+            updated_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+        assert _confirmation_text(SignupStatus.SIGNED, signup) == "Going as Oakenshield · Warrior · Tank"
+
+    def test_bare_rsvp_without_details(self) -> None:
+        signup = Signup(
+            id=uuid4(),
+            member=SignupMember(display_name="Coffee", avatar_url=None),
+            character=None,
+            wow_class=None,
+            role=None,
+            status=SignupStatus.ABSENT,
+            comment=None,
+            group=None,
+            bench=False,
+            updated_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+        assert _confirmation_text(SignupStatus.ABSENT, signup) == "Can't make it."
+
+
+def _fake_interaction(*, user: Mock, api: AsyncMock, guild_id: int = 42) -> Mock:
+    interaction = Mock(spec=discord.Interaction)
+    interaction.guild = SimpleNamespace(id=guild_id)
+    interaction.user = user
+    interaction.client = SimpleNamespace(api=api)
+    interaction.response = Mock()
+    interaction.response.send_message = AsyncMock()
+    interaction.response.send_modal = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup = Mock()
+    interaction.followup.send = AsyncMock()
+    return interaction
+
+
+def _fake_signup(*, status: SignupStatus = SignupStatus.SIGNED, **overrides: object) -> Signup:
+    defaults: dict[str, object] = {
+        "id": uuid4(),
+        "member": SignupMember(display_name="Coffee", avatar_url=None),
+        "character": None,
+        "wow_class": None,
+        "role": None,
+        "status": status,
+        "comment": None,
+        "group": None,
+        "bench": False,
+        "updated_at": datetime(2099, 1, 1, tzinfo=UTC),
+    }
+    defaults.update(overrides)
+    return Signup.model_validate(defaults)
+
+
+class TestSendSignInPrompt:
+    async def test_replies_ephemerally_with_a_link_button_via_followup(self) -> None:
+        """Always called after a defer (every caller defers first), so it must use the followup, not response."""
+        interaction = _fake_interaction(user=Mock(), api=AsyncMock())
+        await _send_sign_in_prompt(interaction)
+        interaction.followup.send.assert_awaited_once()
+        interaction.response.send_message.assert_not_awaited()
+        _, kwargs = interaction.followup.send.call_args
+        assert kwargs["ephemeral"] is True
+        assert "/account/" in interaction.followup.send.call_args.args[0]
+        (button,) = kwargs["view"].children
+        assert button.url is not None
+
+
+class TestSubmitSignup:
+    async def test_no_site_account_prompts_sign_in(self) -> None:
+        api = AsyncMock()
+        api.upsert_event_signup_by_discord.side_effect = NotFoundError(HTTPStatus.NOT_FOUND, "nope")
+        interaction = _fake_interaction(user=Mock(id=1), api=api)
+        await _submit_signup(interaction, event_id=uuid4(), status=SignupStatus.SIGNED)
+        interaction.followup.send.assert_awaited_once()
+        assert "Sign in" in interaction.followup.send.call_args.args[0]
+
+    async def test_event_not_scheduled_reports_closed(self) -> None:
+        api = AsyncMock()
+        api.upsert_event_signup_by_discord.side_effect = APIError(HTTPStatus.CONFLICT, "nope")
+        interaction = _fake_interaction(user=Mock(id=1), api=api)
+        await _submit_signup(interaction, event_id=uuid4(), status=SignupStatus.SIGNED)
+        interaction.followup.send.assert_awaited_once_with("Sign-ups for this event are closed.", ephemeral=True)
+
+    async def test_bare_status_sends_plain_confirmation(self) -> None:
+        api = AsyncMock()
+        api.upsert_event_signup_by_discord.return_value = _fake_signup(status=SignupStatus.ABSENT)
+        interaction = _fake_interaction(user=Mock(id=1), api=api)
+        await _submit_signup(interaction, event_id=uuid4(), status=SignupStatus.ABSENT)
+        interaction.followup.send.assert_awaited_once_with("Can't make it.", ephemeral=True)
+
+    async def test_role_kind_signup_offers_change_button(self) -> None:
+        api = AsyncMock()
+        api.upsert_event_signup_by_discord.return_value = _fake_signup(
+            character="Oakenshield", wow_class=WowClass.WARRIOR, role=SignupRole.TANK
+        )
+        interaction = _fake_interaction(user=Mock(id=1), api=api)
+        await _submit_signup(
+            interaction,
+            event_id=uuid4(),
+            status=SignupStatus.SIGNED,
+            character="Oakenshield",
+            wow_class=WowClass.WARRIOR,
+            role=SignupRole.TANK,
+        )
+        _, kwargs = interaction.followup.send.call_args
+        assert "view" in kwargs
+        (button,) = kwargs["view"].children
+        assert button.item.label == "Change character or role"
+
+
+class TestHandleSignupClick:
+    async def test_defers_ephemerally_before_the_lookup(self) -> None:
+        """Every click must ack within 3s: defer happens before the GET, not after."""
+        api = AsyncMock()
+        api.get_event_signup_by_discord.side_effect = NotFoundError(HTTPStatus.NOT_FOUND, "nope")
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        await _handle_signup_click(interaction, event_id=uuid4(), status=SignupStatus.SIGNED)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+
+    async def test_no_site_account_prompts_sign_in_via_followup(self) -> None:
+        api = AsyncMock()
+        api.get_event_signup_by_discord.side_effect = NotFoundError(HTTPStatus.NOT_FOUND, "nope")
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        await _handle_signup_click(interaction, event_id=uuid4(), status=SignupStatus.SIGNED)
+        assert "Sign in" in interaction.followup.send.call_args.args[0]
+
+    async def test_absent_status_submits_immediately_without_lookup_details(self) -> None:
+        api = AsyncMock()
+        api.get_event_signup_by_discord.return_value = SignupByDiscord(signup=None, defaults=None, kind=EventKind.RAID)
+        api.upsert_event_signup_by_discord.return_value = _fake_signup(status=SignupStatus.ABSENT)
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        await _handle_signup_click(interaction, event_id=uuid4(), status=SignupStatus.ABSENT)
+        api.upsert_event_signup_by_discord.assert_awaited_once()
+        _, _, _, data = api.upsert_event_signup_by_discord.await_args.args
+        assert data.character is None
+
+    async def test_non_role_kind_bare_rsvp_submits_immediately(self) -> None:
+        api = AsyncMock()
+        api.get_event_signup_by_discord.return_value = SignupByDiscord(
+            signup=None, defaults=None, kind=EventKind.SOCIAL
+        )
+        api.upsert_event_signup_by_discord.return_value = _fake_signup(status=SignupStatus.SIGNED)
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        await _handle_signup_click(interaction, event_id=uuid4(), status=SignupStatus.SIGNED)
+        api.upsert_event_signup_by_discord.assert_awaited_once()
+
+    async def test_role_kind_with_defaults_submits_with_prior_character(self) -> None:
+        api = AsyncMock()
+        api.get_event_signup_by_discord.return_value = SignupByDiscord(
+            signup=None,
+            defaults=SignupDefaults(character="Oakenshield", wow_class=WowClass.WARRIOR, role=SignupRole.TANK),
+            kind=EventKind.RAID,
+        )
+        api.upsert_event_signup_by_discord.return_value = _fake_signup(
+            character="Oakenshield", wow_class=WowClass.WARRIOR, role=SignupRole.TANK
+        )
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        await _handle_signup_click(interaction, event_id=uuid4(), status=SignupStatus.SIGNED)
+        api.upsert_event_signup_by_discord.assert_awaited_once()
+        _, _, _, data = api.upsert_event_signup_by_discord.await_args.args
+        assert data.character == "Oakenshield"
+
+    async def test_role_kind_without_defaults_offers_enter_details_button_without_opening_a_modal(self) -> None:
+        """No defaults means no modal can be opened directly (already deferred); offer a button instead."""
+        api = AsyncMock()
+        api.get_event_signup_by_discord.return_value = SignupByDiscord(signup=None, defaults=None, kind=EventKind.RAID)
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, roles=[], id=1), api=api)
+        await _handle_signup_click(interaction, event_id=uuid4(), status=SignupStatus.SIGNED)
+        interaction.response.send_modal.assert_not_awaited()
+        api.upsert_event_signup_by_discord.assert_not_awaited()
+        _, kwargs = interaction.followup.send.call_args
+        (button,) = kwargs["view"].children
+        assert button.label == "Enter character and role"
+
+
+class TestEventSignupButton:
+    def test_round_trips_through_from_custom_id(self) -> None:
+        event_id = uuid4()
+        button = EventSignupButton(event_id, SignupStatus.TENTATIVE)
+        assert button.item.custom_id == build_signup_custom_id(event_id, SignupStatus.TENTATIVE)
+        assert button.item.label == "Maybe"
+
+
+class TestEnterDetailsView:
+    async def test_opens_modal_with_no_api_calls(self) -> None:
+        """The whole point: this button must open the modal with zero network round trips."""
+        api = AsyncMock()
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        view = _EnterDetailsView(event_id=uuid4(), status=SignupStatus.SIGNED, wow_class=WowClass.WARRIOR)
+        await view.enter_details.callback(interaction)
+        interaction.response.send_modal.assert_awaited_once()
+        (modal,) = interaction.response.send_modal.await_args.args
+        assert isinstance(modal, SignupDetailsModal)
+        assert modal._class_select.options[0].default == (modal._class_select.options[0].value == "warrior")
+        api.get_event_signup_by_discord.assert_not_awaited()
+        api.upsert_event_signup_by_discord.assert_not_awaited()
+
+
+class TestChangeSignupDetailsButton:
+    async def test_defers_ephemerally_before_the_lookup(self) -> None:
+        api = AsyncMock()
+        api.get_event_signup_by_discord.side_effect = NotFoundError(HTTPStatus.NOT_FOUND, "nope")
+        button = ChangeSignupDetailsButton(uuid4(), SignupStatus.SIGNED)
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        await button.callback(interaction)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+
+    async def test_no_site_account_prompts_sign_in_via_followup(self) -> None:
+        api = AsyncMock()
+        api.get_event_signup_by_discord.side_effect = NotFoundError(HTTPStatus.NOT_FOUND, "nope")
+        button = ChangeSignupDetailsButton(uuid4(), SignupStatus.SIGNED)
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        await button.callback(interaction)
+        assert "Sign in" in interaction.followup.send.call_args.args[0]
+
+    async def test_offers_enter_details_button_prefilled_with_current_signup(self) -> None:
+        api = AsyncMock()
+        api.get_event_signup_by_discord.return_value = SignupByDiscord(
+            signup=_fake_signup(character="Oakenshield", wow_class=WowClass.WARRIOR, role=SignupRole.TANK),
+            defaults=None,
+            kind=EventKind.RAID,
+        )
+        button = ChangeSignupDetailsButton(uuid4(), SignupStatus.SIGNED)
+        interaction = _fake_interaction(user=MagicMock(spec=discord.Member, id=1), api=api)
+        await button.callback(interaction)
+        interaction.response.send_modal.assert_not_awaited()
+        _, kwargs = interaction.followup.send.call_args
+        (button_item,) = kwargs["view"].children
+        assert button_item.label == "Enter character and role"
+        view = kwargs["view"]
+        assert view.character == "Oakenshield"
+        assert view.wow_class == WowClass.WARRIOR
+        assert view.role == SignupRole.TANK
+        # Opening it from here makes no further API call.
+        await view.enter_details.callback(interaction)
+        (modal,) = interaction.response.send_modal.await_args.args
+        assert modal._character_input.default == "Oakenshield"
+        assert api.get_event_signup_by_discord.await_count == 1

@@ -8,7 +8,9 @@ bot half of it. The API decides what Discord should show; this cog is the only t
 
 When a forum channel is configured (``/eventsync forum``), every upcoming push also gets a forum post: one thread
 per guild event, tagged by kind, edited in place as the event changes, archived+locked on cancel/complete/deletion,
-and commented on as members sign up, go tentative, decline, or withdraw.
+and commented on as members sign up, go tentative, decline, or withdraw. The starter post also carries persistent
+Going/Maybe/Can't buttons (``EventSignupButton``) and a live counts line, so members can sign up from Discord and
+see it reflected on the site, and vice versa, within one sync cycle.
 """
 
 import asyncio
@@ -16,7 +18,10 @@ import contextlib
 import logging
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from functools import lru_cache
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any, Final, Self, cast
+from uuid import UUID
 
 import discord
 from discord import app_commands
@@ -26,6 +31,7 @@ from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_common.schemas import (
     EVENT_KIND_LABELS,
+    ROLE_KINDS,
     DiscordEventPush,
     DiscordEventReconcile,
     DiscordEventState,
@@ -34,18 +40,25 @@ from sidequest_common.schemas import (
     DiscordPushAck,
     EventKind,
     GuildConfigUpdate,
+    Signup,
     SignupActivity,
+    SignupRole,
+    SignupStatus,
+    SignupUpsert,
+    WowClass,
 )
+from sidequest_common.settings import WebSettings
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Sequence
-    from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 15
 INTEREST_DEBOUNCE_SECONDS = 5
 MAX_FORUM_STARTER_LENGTH = 2000
+FORUM_THREAD_UPGRADE_SLEEP_SECONDS = 0.5
+"""Pause between forum starter edits in ``_upgrade_existing_forum_threads``, to stay rate-limit friendly."""
 
 _STATUS_MAP: dict[discord.EventStatus, DiscordEventStatus] = {
     discord.EventStatus.scheduled: DiscordEventStatus.SCHEDULED,
@@ -66,6 +79,44 @@ _ACTIVITY_VERB = {"going": "is going", "maybe": "might make it", "not_going": "c
 # Discord markdown characters (plus a line-leading list dash) in a member's sign-up comment, escaped so it shows as
 # typed. discord.utils.escape_markdown would do, but it trips a DeprecationWarning on Python 3.15.
 _COMMENT_MARKDOWN = re.compile(r"[\\*_~`|>#\[\]]|^-", re.MULTILINE)
+
+_UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_SIGNUP_CUSTOM_ID_RE: Final = re.compile(rf"^sq:ev:(?P<event_id>{_UUID_PATTERN}):(?P<status>signed|tentative|absent)$")
+_CHANGE_CUSTOM_ID_RE: Final = re.compile(rf"^sq:evc:(?P<event_id>{_UUID_PATTERN}):(?P<status>signed|tentative|absent)$")
+# Matches the "Sign up: {signup_url}" link in a forum starter post's content (see ``build_starter_message``),
+# which ends in "/events/detail/?id={event_id}"; used to recover an existing thread's event id without a push.
+_SIGNUP_LINK_ID_RE: Final = re.compile(rf"/events/detail/\?id=({_UUID_PATTERN})")
+
+_SIGNUP_BUTTON_LABEL: dict[SignupStatus, str] = {
+    SignupStatus.SIGNED: "Going",
+    SignupStatus.TENTATIVE: "Maybe",
+    SignupStatus.ABSENT: "Can't",
+}
+_SIGNUP_BUTTON_STYLE: dict[SignupStatus, discord.ButtonStyle] = {
+    SignupStatus.SIGNED: discord.ButtonStyle.success,
+    SignupStatus.TENTATIVE: discord.ButtonStyle.secondary,
+    SignupStatus.ABSENT: discord.ButtonStyle.danger,
+}
+_SIGNUP_STATUS_VERB: dict[SignupStatus, str] = {
+    SignupStatus.SIGNED: "Going",
+    SignupStatus.TENTATIVE: "Maybe",
+    SignupStatus.ABSENT: "Can't make it",
+}
+_ROLE_LABELS: dict[SignupRole, str] = {SignupRole.TANK: "Tank", SignupRole.HEALER: "Healer", SignupRole.DPS: "DPS"}
+_CLASS_OPTIONS: Final = [
+    discord.SelectOption(label=wow_class.value.capitalize(), value=wow_class.value) for wow_class in WowClass
+]
+_ROLE_OPTIONS: Final = [discord.SelectOption(label=label, value=role.value) for role, label in _ROLE_LABELS.items()]
+
+_SIGN_IN_MESSAGE = "Sign in at {url} first."
+_CLOSED_SIGNUP_ERROR = "Sign-ups for this event are closed."
+_GENERIC_SIGNUP_ERROR = "Couldn't record your sign-up; try again shortly."
+
+
+@lru_cache(maxsize=1)
+def _web_settings() -> WebSettings:
+    """``WebSettings`` (``WEB_*`` env vars), shared with the API: ``BASE_URL`` for the sign-in link."""
+    return WebSettings()
 
 
 def _utc(value: datetime) -> datetime:
@@ -105,11 +156,23 @@ def _strip_description_footer(description: str) -> str:
     return notes.strip()
 
 
+def build_counts_line(push: DiscordEventPush) -> str:
+    """Live headcounts for the forum starter post, e.g. "Going 12 (2 tanks · 3 healers · 7 DPS) · Maybe 1 · Can't 2".
+
+    Role-kind events (raid, dungeon) break "Going" down by tank/healer/DPS; other kinds just show the total.
+    """
+    counts = push.counts
+    going = f"Going {counts.signed}"
+    if push.kind in ROLE_KINDS:
+        going += f" ({counts.tank} tanks · {counts.healer} healers · {counts.dps} DPS)"
+    return f"{going} · Maybe {counts.tentative} · Can't {counts.absent}"
+
+
 def build_starter_message(push: DiscordEventPush, *, guild_id: int, discord_event_id: int) -> str:
     """Forum starter-post content for ``push``, trimmed to fit Discord's 2000-char message limit.
 
-    Layout: kind · location, the start (and end) time as Discord timestamps, the event's notes (trimmed to fit),
-    the sign-up link, and a link back to the Discord event.
+    Layout: kind · location, the start (and end) time as Discord timestamps, the live counts line, the event's
+    notes (trimmed to fit), the sign-up link, and a link back to the Discord event.
     """
     header_parts = [EVENT_KIND_LABELS[push.kind]]
     if push.location:
@@ -117,10 +180,11 @@ def build_starter_message(push: DiscordEventPush, *, guild_id: int, discord_even
     header = " · ".join(header_parts)
     time_line = f"<t:{int(push.starts_at.timestamp())}:F>"
     time_line += f" - <t:{int(push.ends_at.timestamp())}:F>"
+    counts_line = build_counts_line(push)
     links = "\n".join(
         [f"Sign up: {push.signup_url}", f"Discord event: https://discord.com/events/{guild_id}/{discord_event_id}"]
     )
-    skeleton = f"{header}\n\n{time_line}\n\n{links}"
+    skeleton = f"{header}\n\n{time_line}\n{counts_line}\n\n{links}"
     notes = _strip_description_footer(push.description)
     if not notes:
         return skeleton
@@ -128,7 +192,7 @@ def build_starter_message(push: DiscordEventPush, *, guild_id: int, discord_even
     trimmed_notes = _truncate(notes, budget) if budget > 0 else ""
     if not trimmed_notes:
         return skeleton
-    return f"{header}\n\n{time_line}\n\n{trimmed_notes}\n\n{links}"
+    return f"{header}\n\n{time_line}\n{counts_line}\n\n{trimmed_notes}\n\n{links}"
 
 
 def build_activity_line(activity: SignupActivity) -> str:
@@ -152,6 +216,341 @@ def _find_tag(tags: Sequence[discord.ForumTag], kind: EventKind) -> discord.Foru
     """The forum tag whose name matches ``kind``'s label, if the forum already has one."""
     label = EVENT_KIND_LABELS[kind]
     return next((tag for tag in tags if tag.name == label), None)
+
+
+def extract_event_id_from_starter(content: str) -> UUID | None:
+    """The event id embedded in a forum starter post's "Sign up:" link, or ``None`` if it can't be found/parsed."""
+    match = _SIGNUP_LINK_ID_RE.search(content)
+    if match is None:
+        return None
+    try:
+        return UUID(match.group(1))
+    except ValueError:
+        return None
+
+
+# --- Discord sign-up buttons (Going/Maybe/Can't) -----------------------------------------------------------------
+
+
+def build_signup_custom_id(event_id: UUID, status: SignupStatus) -> str:
+    """The ``custom_id`` for one event's Going/Maybe/Can't button."""
+    return f"sq:ev:{event_id}:{status.value}"
+
+
+def parse_signup_custom_id(custom_id: str) -> tuple[UUID, SignupStatus] | None:
+    """``(event_id, status)`` if ``custom_id`` matches our template, else ``None``."""
+    match = _SIGNUP_CUSTOM_ID_RE.match(custom_id)
+    if match is None:
+        return None
+    return UUID(match["event_id"]), SignupStatus(match["status"])
+
+
+def build_change_custom_id(event_id: UUID, status: SignupStatus) -> str:
+    """The ``custom_id`` for one sign-up's "Change character or role" button."""
+    return f"sq:evc:{event_id}:{status.value}"
+
+
+def parse_change_custom_id(custom_id: str) -> tuple[UUID, SignupStatus] | None:
+    """``(event_id, status)`` if ``custom_id`` matches our "change details" template, else ``None``."""
+    match = _CHANGE_CUSTOM_ID_RE.match(custom_id)
+    if match is None:
+        return None
+    return UUID(match["event_id"]), SignupStatus(match["status"])
+
+
+def build_signup_view(event_id: UUID) -> discord.ui.View:
+    """A persistent view with the Going/Maybe/Can't buttons for one event's forum starter post."""
+    view = discord.ui.View(timeout=None)
+    for status in (SignupStatus.SIGNED, SignupStatus.TENTATIVE, SignupStatus.ABSENT):
+        view.add_item(EventSignupButton(event_id, status))
+    return view
+
+
+def _guess_class_from_roles(member: discord.Member) -> WowClass | None:
+    """The ``WowClass`` matching one of ``member``'s Discord role names (e.g. a ``Warrior`` role), if any."""
+    names = {role.name for role in member.roles}
+    return next((wow_class for wow_class in WowClass if wow_class.value.capitalize() in names), None)
+
+
+def _confirmation_text(status: SignupStatus, signup: Signup) -> str:
+    """A confirmation line, e.g. "Going as Oakenshield · Warrior · Tank" for a role-kind sign-up.
+
+    The bare form ("Going."/"Maybe."/"Can't make it.") is used for non-role-kind events and "can't make it".
+    """
+    verb = _SIGNUP_STATUS_VERB[status]
+    if signup.character and signup.wow_class and signup.role:
+        return f"{verb} as {signup.character} · {signup.wow_class.value.capitalize()} · {_ROLE_LABELS[signup.role]}"
+    return f"{verb}."
+
+
+async def _send_sign_in_prompt(interaction: discord.Interaction[SideQuestBot]) -> None:
+    """The clicker has no site account: tell them to sign in, with a link button.
+
+    Always called after the interaction has been deferred (every caller defers before its first API call), so
+    this replies through the followup rather than the original response.
+    """
+    url = f"{_web_settings().BASE_URL.rstrip('/')}/account/"
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Sign in", url=url, style=discord.ButtonStyle.link))
+    await interaction.followup.send(_SIGN_IN_MESSAGE.format(url=url), view=view, ephemeral=True)
+
+
+async def _submit_signup(
+    interaction: discord.Interaction[SideQuestBot],
+    *,
+    event_id: UUID,
+    status: SignupStatus,
+    character: str | None = None,
+    wow_class: WowClass | None = None,
+    role: SignupRole | None = None,
+) -> None:
+    """Upsert the signup via the API and reply ephemerally through the followup.
+
+    Always called after the interaction has been deferred: from ``_handle_signup_click`` (deferred before its
+    lookup) and from :meth:`SignupDetailsModal.on_submit` (deferred before this call).
+    """
+    guild = interaction.guild
+    if guild is None:
+        return
+    data = SignupUpsert(status=status, character=character, wow_class=wow_class, role=role)
+    try:
+        signup = await interaction.client.api.upsert_event_signup_by_discord(
+            guild.id, event_id, interaction.user.id, data
+        )
+    except NotFoundError:
+        await _send_sign_in_prompt(interaction)
+        return
+    except APIError as exc:
+        message = _CLOSED_SIGNUP_ERROR if exc.status_code == HTTPStatus.CONFLICT else _GENERIC_SIGNUP_ERROR
+        await interaction.followup.send(message, ephemeral=True)
+        return
+    content = _confirmation_text(status, signup)
+    if role is None:
+        await interaction.followup.send(content, ephemeral=True)
+        return
+    change_view = discord.ui.View(timeout=300)
+    change_view.add_item(ChangeSignupDetailsButton(event_id, status))
+    await interaction.followup.send(content, view=change_view, ephemeral=True)
+
+
+class _EnterDetailsView(discord.ui.View):
+    """Ephemeral view with one button that opens the signup details modal, prefilled from closure state.
+
+    Not a :class:`discord.ui.DynamicItem`: this button only ever lives inside one interaction's followup message
+    (timeout bound, not persisted across restarts), so it doesn't need ``custom_id`` reconstruction. Opening the
+    modal from its callback makes no API call, so it's always well within Discord's 3-second response window.
+    """
+
+    def __init__(
+        self,
+        *,
+        event_id: UUID,
+        status: SignupStatus,
+        character: str | None = None,
+        wow_class: WowClass | None = None,
+        role: SignupRole | None = None,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.event_id = event_id
+        self.status = status
+        self.character = character
+        self.wow_class = wow_class
+        self.role = role
+
+    @discord.ui.button(label="Enter character and role", style=discord.ButtonStyle.primary)
+    async def enter_details(
+        self, interaction: discord.Interaction[SideQuestBot], _button: discord.ui.Button[Self]
+    ) -> None:
+        """Open the details modal immediately: no network call, so it's safe within Discord's 3s window."""
+        modal = SignupDetailsModal(
+            event_id=self.event_id,
+            status=self.status,
+            character=self.character,
+            wow_class=self.wow_class,
+            role=self.role,
+        )
+        await interaction.response.send_modal(modal)
+
+
+async def _handle_signup_click(
+    interaction: discord.Interaction[SideQuestBot], *, event_id: UUID, status: SignupStatus
+) -> None:
+    """Route a Going/Maybe/Can't click: sign-in prompt, bare RSVP, auto-fill from past details, or a details modal.
+
+    Defers (ephemeral, "thinking") before the lookup GET, the only way to stay within Discord's 3-second ack
+    window once a network call is involved. A role-kind event with no known details can't send a modal at this
+    point (Discord doesn't allow a modal after a deferral), so it instead offers a button that opens the modal
+    on a fresh interaction, prefilled only from the member's Discord class role (no further API call needed).
+    """
+    guild = interaction.guild
+    if guild is None or not isinstance(interaction.user, discord.Member):
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        lookup = await interaction.client.api.get_event_signup_by_discord(guild.id, event_id, interaction.user.id)
+    except NotFoundError:
+        await _send_sign_in_prompt(interaction)
+        return
+    except APIError:
+        await interaction.followup.send(_GENERIC_SIGNUP_ERROR, ephemeral=True)
+        return
+    if status == SignupStatus.ABSENT or lookup.kind not in ROLE_KINDS:
+        await _submit_signup(interaction, event_id=event_id, status=status)
+        return
+    defaults = lookup.defaults
+    if defaults is not None:
+        await _submit_signup(
+            interaction,
+            event_id=event_id,
+            status=status,
+            character=defaults.character,
+            wow_class=defaults.wow_class,
+            role=defaults.role,
+        )
+        return
+    view = _EnterDetailsView(event_id=event_id, status=status, wow_class=_guess_class_from_roles(interaction.user))
+    await interaction.followup.send("Enter your character and role to finish signing up.", ephemeral=True, view=view)
+
+
+class SignupDetailsModal(discord.ui.Modal, title="Sign up for this event"):
+    """Character name, class, and role, for a role-kind event's Going/Maybe sign-up (new or changed)."""
+
+    character_label = discord.ui.Label(
+        text="Character name", component=discord.ui.TextInput(max_length=24, placeholder="Oakenshield")
+    )
+    class_label = discord.ui.Label(text="Class", component=discord.ui.Select(options=_CLASS_OPTIONS))
+    role_label = discord.ui.Label(text="Role", component=discord.ui.Select(options=_ROLE_OPTIONS))
+
+    @property
+    def _character_input(self) -> discord.ui.TextInput[Self]:
+        """``character_label.component``, typed: ``Label.component`` is declared as the untyped base ``Item``."""
+        return cast("discord.ui.TextInput[Self]", self.character_label.component)
+
+    @property
+    def _class_select(self) -> discord.ui.Select[Self]:
+        """``class_label.component``, typed."""
+        return cast("discord.ui.Select[Self]", self.class_label.component)
+
+    @property
+    def _role_select(self) -> discord.ui.Select[Self]:
+        """``role_label.component``, typed."""
+        return cast("discord.ui.Select[Self]", self.role_label.component)
+
+    def __init__(
+        self,
+        *,
+        event_id: UUID,
+        status: SignupStatus,
+        character: str | None = None,
+        wow_class: WowClass | None = None,
+        role: SignupRole | None = None,
+    ) -> None:
+        super().__init__()
+        self.event_id = event_id
+        self.status = status
+        if character is not None:
+            self._character_input.default = character
+        if wow_class is not None:
+            for option in self._class_select.options:
+                option.default = option.value == wow_class.value
+        if role is not None:
+            for option in self._role_select.options:
+                option.default = option.value == role.value
+
+    async def on_submit(self, interaction: discord.Interaction[SideQuestBot]) -> None:
+        """Defer, then submit the chosen character/class/role as the pending sign-up and reply via followup."""
+        character = self._character_input.value
+        wow_class = WowClass(self._class_select.values[0])
+        role = SignupRole(self._role_select.values[0])
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await _submit_signup(
+            interaction,
+            event_id=self.event_id,
+            status=self.status,
+            character=character,
+            wow_class=wow_class,
+            role=role,
+        )
+
+
+class EventSignupButton(discord.ui.DynamicItem[discord.ui.Button], template=_SIGNUP_CUSTOM_ID_RE):
+    """A Going/Maybe/Can't button on an event's forum starter post; state lives entirely in its ``custom_id``."""
+
+    def __init__(self, event_id: UUID, status: SignupStatus) -> None:
+        super().__init__(
+            discord.ui.Button(
+                style=_SIGNUP_BUTTON_STYLE[status],
+                label=_SIGNUP_BUTTON_LABEL[status],
+                custom_id=build_signup_custom_id(event_id, status),
+            )
+        )
+        self.event_id = event_id
+        self.status = status
+
+    @classmethod
+    async def from_custom_id(
+        cls, _interaction: discord.Interaction[Any], _item: discord.ui.Item[Any], match: re.Match[str], /
+    ) -> Self:
+        """Rebuild the button from a dispatched component after a restart."""
+        return cls(UUID(match["event_id"]), SignupStatus(match["status"]))
+
+    async def callback(self, interaction: discord.Interaction[SideQuestBot]) -> None:
+        """Route the click through ``_handle_signup_click``."""
+        await _handle_signup_click(interaction, event_id=self.event_id, status=self.status)
+
+
+class ChangeSignupDetailsButton(discord.ui.DynamicItem[discord.ui.Button], template=_CHANGE_CUSTOM_ID_RE):
+    """The "Change character or role" button on a sign-up confirmation; opens the details modal pre-filled."""
+
+    def __init__(self, event_id: UUID, status: SignupStatus) -> None:
+        super().__init__(
+            discord.ui.Button(
+                style=discord.ButtonStyle.secondary,
+                label="Change character or role",
+                custom_id=build_change_custom_id(event_id, status),
+            )
+        )
+        self.event_id = event_id
+        self.status = status
+
+    @classmethod
+    async def from_custom_id(
+        cls, _interaction: discord.Interaction[Any], _item: discord.ui.Item[Any], match: re.Match[str], /
+    ) -> Self:
+        """Rebuild the button from a dispatched component after a restart."""
+        return cls(UUID(match["event_id"]), SignupStatus(match["status"]))
+
+    async def callback(self, interaction: discord.Interaction[SideQuestBot]) -> None:
+        """Re-fetch the member's current signup, then offer a button that opens the details modal pre-filled.
+
+        Defers before the lookup GET (same reasoning as ``_handle_signup_click``) and so can't send the modal
+        directly from this callback; the followup's button opens it on a fresh interaction instead.
+        """
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            lookup = await interaction.client.api.get_event_signup_by_discord(
+                guild.id, self.event_id, interaction.user.id
+            )
+        except NotFoundError:
+            await _send_sign_in_prompt(interaction)
+            return
+        except APIError:
+            await interaction.followup.send(_GENERIC_SIGNUP_ERROR, ephemeral=True)
+            return
+        current = lookup.signup
+        view = _EnterDetailsView(
+            event_id=self.event_id,
+            status=self.status,
+            character=current.character if current else None,
+            wow_class=current.wow_class if current else None,
+            role=current.role if current else None,
+        )
+        await interaction.followup.send(
+            "Enter your character and role to update your sign-up.", ephemeral=True, view=view
+        )
 
 
 class EventSyncCog(commands.Cog):
@@ -212,6 +611,47 @@ class EventSyncCog(commands.Cog):
         await self.bot.api.reconcile_event_sync(guild.id, reconcile)
         for event in events:
             await self._report_interest(event)
+        await self._upgrade_existing_forum_threads(guild)
+
+    async def _upgrade_existing_forum_threads(self, guild: discord.Guild) -> None:
+        """One-time per-guild catch-up: give every active forum thread missing sign-up buttons its view.
+
+        An old worker mid rolling-deploy can edit a forum starter post without buttons (it doesn't know the
+        buttons exist) and still ack the push's content hash, so a new worker's ``list_pending`` never flags
+        that event again: the hash only tracks content, not whether the components landed. Walk every active
+        forum thread here instead of trusting that hash, so a missed button upgrade still lands on the next
+        reconcile. Sequential with a small sleep between edits to stay rate-limit friendly.
+        """
+        config = await self.bot.configs.get(guild.id)
+        if config.events_forum_channel_id is None:
+            return
+        forum = guild.get_channel(config.events_forum_channel_id)
+        if not isinstance(forum, discord.ForumChannel):
+            return
+        for thread in forum.threads:
+            await self._upgrade_one_forum_thread(thread)
+            await asyncio.sleep(FORUM_THREAD_UPGRADE_SLEEP_SECONDS)
+
+    async def _upgrade_one_forum_thread(self, thread: discord.Thread) -> None:
+        """Add the sign-up view to ``thread``'s starter post if it's missing one and we can recover its event id."""
+        try:
+            starter = await thread.fetch_message(thread.id)
+        except discord.NotFound, discord.Forbidden:
+            return
+        if starter.components:
+            return
+        event_id = extract_event_id_from_starter(starter.content)
+        if event_id is None:
+            return
+        try:
+            await starter.edit(view=build_signup_view(event_id))
+        except discord.HTTPException:
+            logger.warning(
+                "Failed to upgrade forum starter buttons for thread %s in guild %s",
+                thread.id,
+                thread.guild.id,
+                exc_info=True,
+            )
 
     async def _sync_guild(self, guild: discord.Guild) -> None:
         """Apply one cycle's worth of pending deletions, pushes, and activity comments."""
@@ -353,10 +793,13 @@ class EventSyncCog(commands.Cog):
     ) -> int | None:
         name = push.title[:100]
         content = build_starter_message(push, guild_id=forum.guild.id, discord_event_id=discord_event_id)
+        view = build_signup_view(push.event_id)
         if push.thread_id is None:
             tag = await self._ensure_tag(forum, push.kind)
             try:
-                created = await forum.create_thread(name=name, content=content, applied_tags=[tag] if tag else [])
+                created = await forum.create_thread(
+                    name=name, content=content, applied_tags=[tag] if tag else [], view=view
+                )
             except discord.Forbidden:
                 self._warn_forum_forbidden(forum.guild.id)
                 return None
@@ -367,12 +810,17 @@ class EventSyncCog(commands.Cog):
         try:
             await thread.edit(name=name)
             starter = await thread.fetch_message(thread.id)
-            await starter.edit(content=content)
+            await starter.edit(content=content, view=view)
         except discord.Forbidden:
             self._warn_forum_forbidden(forum.guild.id)
         except discord.NotFound:
             pass
         return push.thread_id
+
+    async def _clear_starter_buttons(self, thread: discord.Thread) -> None:
+        """Remove the Going/Maybe/Can't buttons from ``thread``'s starter message (cancelled/completed/deleted)."""
+        starter = await thread.fetch_message(thread.id)
+        await starter.edit(view=None)
 
     async def _ensure_cancel_or_complete_thread(
         self, forum: discord.ForumChannel, push: DiscordEventPush
@@ -383,6 +831,7 @@ class EventSyncCog(commands.Cog):
         if thread is None:
             return None
         try:
+            await self._clear_starter_buttons(thread)
             if push.action == "cancel":
                 await thread.send("This event was cancelled.", allowed_mentions=discord.AllowedMentions.none())
             await thread.edit(archived=True, locked=True)
@@ -401,6 +850,7 @@ class EventSyncCog(commands.Cog):
         if thread is None:
             return
         try:
+            await self._clear_starter_buttons(thread)
             await thread.send("This event was removed.", allowed_mentions=discord.AllowedMentions.none())
             await thread.edit(archived=True, locked=True)
         except discord.Forbidden:
@@ -558,5 +1008,6 @@ class EventSyncCog(commands.Cog):
 
 
 async def setup(bot: SideQuestBot) -> None:
-    """Register the cog."""
+    """Register the persistent sign-up buttons and the cog."""
+    bot.add_dynamic_items(EventSignupButton, ChangeSignupDetailsButton)
     await bot.add_cog(EventSyncCog(bot))

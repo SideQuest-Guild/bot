@@ -509,7 +509,7 @@ class TestGuestWelcomeDm:
 
         with patch.object(link_roles_module, "send_guest_welcome_dm", new_callable=AsyncMock) as send_dm:
             await cog._sync_guild(guild)
-            send_dm.assert_awaited_once_with(member)
+            send_dm.assert_awaited_once_with(member, api)
 
             # Discord would now actually hold the role, so the next tick's member_role_ids reflects that and
             # plan_role_changes no longer lists it in to_add - no stored "already welcomed" flag needed.

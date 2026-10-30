@@ -10,6 +10,9 @@ from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_a
 
 from sidequest_common.schemas import (
     ActivityAck,
+    AwayNowReport,
+    BadgeAck,
+    BadgeSyncReport,
     ConfirmByDiscordRequest,
     DiscordEventReconcile,
     DiscordEventState,
@@ -34,19 +37,26 @@ from sidequest_common.schemas import (
     ModCaseSchema,
     ModCaseUpdate,
     RankSchema,
+    Recruiting,
     RoleMenuCreate,
     RoleMenuOptionUpsert,
     RoleMenuSchema,
     RoleMenuUpdate,
     RoleResetCandidate,
     SetXPRequest,
+    Signup,
+    SignupByDiscord,
     SignupNoticeAck,
     SignupNoticesPage,
+    SignupUpsert,
+    VoicePresenceReport,
+    WeeklyBoardEvent,
     XPAwardResult,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
     from types import TracebackType
     from uuid import UUID
 
@@ -62,6 +72,7 @@ _ROLE_MENUS = TypeAdapter(list[RoleMenuSchema])
 _EVENTS = TypeAdapter(list[EventSummary])
 _MEMBER_LINKS = TypeAdapter(list[MemberLink])
 _ROLE_RESETS = TypeAdapter(list[RoleResetCandidate])
+_WEEKLY_BOARD_EVENTS = TypeAdapter(list[WeeklyBoardEvent])
 
 
 class APIError(Exception):
@@ -198,6 +209,13 @@ class SideQuestAPI:
         """Every signed-in member of ``guild_id``, and whether they've also linked Battle.net."""
         data = await self._request("GET", f"{self._guild(guild_id)}/member-links")
         return _parse(_MEMBER_LINKS.validate_python, data)
+
+    # --- Away
+
+    async def get_away_now(self, guild_id: int) -> list[int]:
+        """Discord ids of members marked away today (America/Chicago)."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/away-now")
+        return _parse(AwayNowReport.model_validate, data).discord_ids
 
     # --- Leveling
 
@@ -345,10 +363,45 @@ class SideQuestAPI:
         """Confirm these sign-up activity rows were posted in their event's forum thread."""
         await self._request("POST", f"{self._guild(guild_id)}/event-sync/activity/ack", body=ActivityAck(ids=ids))
 
+    async def get_event_signup_by_discord(self, guild_id: int, event_id: UUID, discord_id: int) -> SignupByDiscord:
+        """A member's current signup for ``event_id`` plus their most recent character/class/role, by Discord id.
+
+        Raises ``NotFoundError`` if ``discord_id`` has never signed in on the site, or ``event_id`` doesn't exist.
+        """
+        data = await self._request("GET", f"{self._guild(guild_id)}/events/{event_id}/signups/by-discord/{discord_id}")
+        return _parse(SignupByDiscord.model_validate, data)
+
+    async def upsert_event_signup_by_discord(
+        self, guild_id: int, event_id: UUID, discord_id: int, data: SignupUpsert
+    ) -> Signup:
+        """Create or replace a member's signup for ``event_id``, by Discord id (Discord's sign-up buttons).
+
+        Raises ``NotFoundError`` if ``discord_id`` has never signed in. The caller is responsible for handling a
+        409 (event not scheduled) or 400 (role kind missing character/class/role) ``APIError``.
+        """
+        response = await self._request(
+            "PUT", f"{self._guild(guild_id)}/events/{event_id}/signups/by-discord/{discord_id}", body=data
+        )
+        return _parse(Signup.model_validate, response)
+
     async def list_upcoming_events(self) -> list[EventSummary]:
         """Upcoming guild events, soonest first (the public ``/api/events`` list; also materializes repeats)."""
         data = await self._request("GET", "/api/events", params={"when": "upcoming"})
         return _parse(_EVENTS.validate_python, data)
+
+    async def get_recruiting(self) -> Recruiting:
+        """What roles and classes the guild is recruiting for (the public ``/api/recruiting`` GET)."""
+        data = await self._request("GET", "/api/recruiting")
+        return _parse(Recruiting.model_validate, data)
+
+    async def list_weekly_board_events(self, guild_id: int, start: datetime, end: datetime) -> list[WeeklyBoardEvent]:
+        """Scheduled events starting in ``[start, end)``, soonest first, with their forum thread id if any."""
+        data = await self._request(
+            "GET",
+            f"{self._guild(guild_id)}/weekly-board/events",
+            params={"start": start.isoformat(), "end": end.isoformat()},
+        )
+        return _parse(_WEEKLY_BOARD_EVENTS.validate_python, data)
 
     # --- Live status
 
@@ -359,6 +412,21 @@ class SideQuestAPI:
     async def put_guild_roles(self, guild_id: int, roles: list[GuildRoleIn]) -> None:
         """Replace ``guild_id``'s full role set (excluding ``@everyone``, dropped by the caller)."""
         await self._request("PUT", f"{self._guild(guild_id)}/roles", body=GuildRolesReplace(roles=roles))
+
+    # --- Attendance
+
+    async def report_voice_presence(self, guild_id: int, report: VoicePresenceReport) -> None:
+        """Push cumulative voice minutes per member for one event so far.
+
+        Idempotent: the API keeps ``max(stored, reported)`` per member, so a repeated or restart-reset push never
+        lowers the stored total.
+        """
+        await self._request("PUT", f"{self._guild(guild_id)}/attendance/voice", body=report)
+
+    async def get_voice_presence(self, guild_id: int, event_id: UUID) -> VoicePresenceReport:
+        """Currently stored cumulative voice minutes per member for ``event_id``, to resume tracking after a restart."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/attendance/voice/{event_id}")
+        return _parse(VoicePresenceReport.model_validate, data)
 
     async def put_member_profiles(
         self, guild_id: int, profiles: list[MemberProfileIn], departed_ids: list[int]
@@ -409,3 +477,14 @@ class SideQuestAPI:
     async def ack_role_reset(self, guild_id: int, reset_id: UUID) -> None:
         """Confirm the bot stripped this member's roles (or found them no longer in the guild)."""
         await self._request("POST", f"{self._guild(guild_id)}/role-resets/{reset_id}/ack")
+
+    # --- Badges
+
+    async def sync_badges(self, guild_id: int) -> BadgeSyncReport:
+        """Recompute every member's badges, award newly earned ones, and report role state + new announcements."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/badges/sync")
+        return _parse(BadgeSyncReport.model_validate, data)
+
+    async def ack_badge(self, guild_id: int, ack: BadgeAck) -> None:
+        """Confirm one member's badge announcement posted, so ``sync_badges`` stops reporting it as pending."""
+        await self._request("POST", f"{self._guild(guild_id)}/badges/ack", body=ack)

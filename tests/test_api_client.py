@@ -29,6 +29,7 @@ EVENT_SYNC_URL = f"{BASE}/api/guilds/1/event-sync"
 CASES_URL = f"{BASE}/api/guilds/1/cases"
 MEMBER_LINKS_URL = f"{BASE}/api/guilds/1/member-links"
 MEMBER_PROFILES_URL = f"{BASE}/api/guilds/1/member-profiles"
+AWAY_NOW_URL = f"{BASE}/api/guilds/1/away-now"
 
 
 def _event_state(**overrides: object) -> DiscordEventState:
@@ -212,6 +213,14 @@ async def test_list_member_links_parses_response(api: SideQuestAPI) -> None:
     links = await api.list_member_links(1)
     assert route.call_count == 1
     assert links == [MemberLink(discord_id=123, battlenet_linked=True)]
+
+
+@respx.mock
+async def test_get_away_now_parses_response(api: SideQuestAPI) -> None:
+    route = respx.get(AWAY_NOW_URL).mock(return_value=httpx.Response(200, json={"discord_ids": [123, 456]}))
+    discord_ids = await api.get_away_now(1)
+    assert route.call_count == 1
+    assert discord_ids == [123, 456]
 
 
 @respx.mock

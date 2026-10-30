@@ -223,7 +223,7 @@ class LinkRolesCog(commands.Cog):
                     # The gate -> guest transition: the member just signed in for the first time. Firing the
                     # welcome DM off the successful grant (rather than a stored flag) makes it idempotent for
                     # free - once granted, plan_role_changes never lists this role in to_add again.
-                    await send_guest_welcome_dm(member)
+                    await send_guest_welcome_dm(member, self.bot.api)
         remove_roles = [role for role_id in to_remove if (role := guild.get_role(role_id)) is not None]
         if remove_roles:
             try:

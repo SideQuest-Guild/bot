@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import pytest
 from advanced_alchemy.base import UUIDAuditBase
 from litestar.testing import AsyncTestClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
 import sidequest_common.models  # noqa: F401  # register tables on UUIDAuditBase.metadata
 from sidequest_api.app import create_app
@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from litestar import Litestar
 
 TEST_API_KEY = "test-api-key"
-GUILD_ID = 1564671275316543508
 
 
 @pytest.fixture
@@ -31,14 +30,6 @@ async def database_url(tmp_path: Path) -> str:
         await conn.run_sync(UUIDAuditBase.metadata.create_all)
     await engine.dispose()
     return url
-
-
-@pytest.fixture
-async def db_sessionmaker(database_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Session factory on the test database, for exercising services directly (e.g. concurrent-insert races)."""
-    engine = create_async_engine(database_url)
-    yield async_sessionmaker(engine, expire_on_commit=False)
-    await engine.dispose()
 
 
 @pytest.fixture

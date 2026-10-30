@@ -1,0 +1,115 @@
+[project]
+name = "sidequest-bot"
+version = "0.1.0"
+description = "discord.py bot for the SideQuest Guild"
+authors = [{ name = "Jacob Coffee", email = "jacob@z7x.org" }]
+requires-python = ">=3.15,<4.0"
+license = { text = "MIT" }
+dependencies = [
+    "sidequest-common",
+    "discord-py>=2.7",
+    "httpx>=0.28",
+    "pydantic>=2.14",
+    "pydantic-settings>=2.16",
+    "tenacity>=9.2",
+]
+
+[project.scripts]
+sidequest-bot = "sidequest_bot.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.22.1",
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "pytest-mock>=3.15",
+    "pytest-socket>=0.7",
+    "respx>=0.23",
+    "ruff>=0.17",
+    "pyrefly>=1.4.0",
+    "sidequest-api",
+]
+
+[tool.uv.sources]
+sidequest-common = { git = "https://github.com/SideQuest-Guild/website", rev = "e3f5a89911cd990c95be288002bab16f76ef0090", subdirectory = "packages/sidequest-common" }
+sidequest-api = { git = "https://github.com/SideQuest-Guild/website", rev = "e3f5a89911cd990c95be288002bab16f76ef0090", subdirectory = "api" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+norecursedirs = [".*", "*.egg-info", ".git", ".venv", "node_modules", "htmlcov"]
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "--import-mode=importlib",
+    "-p", "no:doctest",
+    "--disable-socket",
+    "--allow-unix-socket",
+]
+markers = [
+    "integration: needs external services",
+]
+# aiosqlite under pytest: SQLAlchemy reports GC'd pool connections between tests even though each app's pool
+# is empty after shutdown (verified outside pytest). Test-only; production runs on Postgres.
+filterwarnings = [
+    "ignore:The garbage collector is trying to clean up non-checked-in connection:sqlalchemy.exc.SAWarning",
+]
+log_level = "WARNING"
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+project-excludes = ["tests/**"]
+search-path = ["src"]
+python-version = "3.15.0"
+python-interpreter-path = ".venv/bin/python3"
+baseline = "pyrefly-baseline.json"
+
+[tool.ruff]
+line-length = 120
+target-version = "py315"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "ANN401",
+    "COM812",
+    "CPY001",
+    "D105",
+    "D107",
+    "D203",
+    "D213",
+    "ERA001",
+    "FIX002",
+    "ISC001",
+    "PLR0913",
+    "RUF012",
+    "TD",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.isort]
+known-first-party = ["sidequest_api", "sidequest_bot", "sidequest_common", "tests"]
+
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = [
+    "pydantic.BaseModel",
+    "pydantic_settings.BaseSettings",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__main__.py" = ["PLC0415"]  # lazy imports keep `--help`/startup errors cheap
+"tests/**" = [
+    "ANN", "ARG", "D", "DTZ", "EM", "FBT", "INP", "PLC", "PLR", "PLR2004", "PT011", "S", "SLF", "TC", "TRY",
+]

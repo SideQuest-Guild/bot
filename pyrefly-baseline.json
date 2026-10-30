@@ -1,0 +1,53 @@
+{
+  "errors": [
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/guest_welcome.py",
+      "name": "bad-override",
+      "concise_description": "Class member `GuestWelcomeButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "src/sidequest_bot/plugins/logging.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `AppCommand | AutoModRule | Emoji | Guild | GuildChannel | GuildSticker | Invite | Member | Object | PartialIntegration | Role | ScheduledEvent | StageInstance | Thread | User | Webhook | None` is not assignable to parameter `user` with type `Member | User` in function `sidequest_bot.lib.embeds.user_line`",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/role_menus.py",
+      "name": "bad-override",
+      "concise_description": "Class member `RoleMenuButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/signup_notices.py",
+      "name": "bad-override",
+      "concise_description": "Class member `SignupApproveButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/event_sync.py",
+      "name": "bad-override",
+      "concise_description": "Class member `SignupDetailsModal.on_submit` overrides parent class `Modal` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/event_sync.py",
+      "name": "bad-override",
+      "concise_description": "Class member `EventSignupButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/event_sync.py",
+      "name": "bad-override",
+      "concise_description": "Class member `ChangeSignupDetailsButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    }
+  ]
+}

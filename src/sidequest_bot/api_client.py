@@ -10,6 +10,7 @@ from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_a
 
 from sidequest_common.schemas import (
     ActivityAck,
+    AnnouncementPosted,
     AwayNowReport,
     BadgeAck,
     BadgeSyncReport,
@@ -36,6 +37,8 @@ from sidequest_common.schemas import (
     ModCaseCreate,
     ModCaseSchema,
     ModCaseUpdate,
+    PendingAnnouncement,
+    PendingAnnouncementsPage,
     RankSchema,
     Recruiting,
     RoleMenuCreate,
@@ -488,3 +491,18 @@ class SideQuestAPI:
     async def ack_badge(self, guild_id: int, ack: BadgeAck) -> None:
         """Confirm one member's badge announcement posted, so ``sync_badges`` stops reporting it as pending."""
         await self._request("POST", f"{self._guild(guild_id)}/badges/ack", body=ack)
+
+    # --- Guild hub announcements
+
+    async def list_pending_announcements(self, guild_id: int) -> list[PendingAnnouncement]:
+        """Discord-queued announcements not yet posted, oldest first."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/announcements/pending")
+        return _parse(PendingAnnouncementsPage.model_validate, data).items
+
+    async def mark_announcement_posted(self, guild_id: int, announcement_id: UUID, message_id: int) -> None:
+        """Record that ``announcement_id`` posted to Discord as ``message_id``."""
+        await self._request(
+            "POST",
+            f"{self._guild(guild_id)}/announcements/{announcement_id}/posted",
+            body=AnnouncementPosted(message_id=message_id),
+        )

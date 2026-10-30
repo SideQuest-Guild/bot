@@ -21,8 +21,10 @@ tick but pending badges are left un-acked, so they announce in full once a chann
 silently lost for whoever earned them first.
 """
 
+import io
 import logging
-from functools import lru_cache
+from functools import cache, lru_cache
+from importlib.resources import files
 from typing import TYPE_CHECKING
 
 import discord
@@ -43,6 +45,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 300
+
+ROLE_ICONS_FEATURE = "ROLE_ICONS"
+"""Guild feature (boost tier 2) that lets roles carry an image icon."""
+BADGE_ICON_FILENAME = "badge.png"
+
+
+@cache
+def badge_icon(badge_id: str) -> bytes | None:
+    """The badge's 128px PNG from ``sidequest_bot/assets/role_icons`` (``first_steps`` -> ``first-steps.png``)."""
+    icon = files("sidequest_bot") / "assets" / "role_icons" / f"{badge_id.replace('_', '-')}.png"
+    return icon.read_bytes() if icon.is_file() else None
 
 
 @lru_cache(maxsize=1)
@@ -82,15 +95,21 @@ def badge_grant_reason(badge_id: str) -> str:
     return f"Earned {name} on sidequest-guild.com"
 
 
-def build_badge_embed(announcement: PendingBadgeAnnouncement, profile_url: str) -> discord.Embed:
-    """Gold embed for one newly earned badge, with a link to the Hall of Heroes."""
+def build_badge_embed(announcement: PendingBadgeAnnouncement, profile_url: str, *, with_icon: bool) -> discord.Embed:
+    """Gold embed for one newly earned badge, with a link to the Hall of Heroes.
+
+    ``with_icon``: the badge's image rides along as an attachment and shows as the thumbnail; otherwise the
+    definition's emoji leads the title.
+    """
     badge = BADGES.get(announcement.badge_id)
-    icon = f"{badge.icon} " if badge is not None else ""
+    icon = f"{badge.icon} " if badge is not None and not with_icon else ""
     embed = make_embed(
         f"{icon}Badge earned!",
         f"<@{announcement.discord_id}> earned **{announcement.name}**: {announcement.description}",
         color=Colors.GOLD,
     )
+    if with_icon:
+        embed.set_thumbnail(url=f"attachment://{BADGE_ICON_FILENAME}")
     embed.add_field(name="Hall of Heroes", value=f"[View the Hall of Heroes]({profile_url})", inline=False)
     return embed
 
@@ -102,12 +121,14 @@ async def create_badge_role(guild: discord.Guild, badge: BadgeDefinition) -> dis
     every existing role including the bot's own - exactly "below the bot's top role, above @everyone" - without
     this ever calling ``edit_role_positions`` or touching any other role.
     """
+    icon = badge_icon(badge.id) if ROLE_ICONS_FEATURE in guild.features else None
     try:
         return await guild.create_role(
             name=badge.name,
             colour=discord.Colour(badge.color),
             hoist=False,
             mentionable=False,
+            display_icon=icon if icon is not None else discord.utils.MISSING,
             reason=f"Hall of Heroes badge role: {badge.name}",
         )
     except discord.HTTPException:
@@ -172,7 +193,8 @@ class BadgesCog(commands.Cog):
         changed = False
         for badge in BADGE_LIST:
             stored_id = updated.get(badge.id)
-            if stored_id is not None and guild.get_role(stored_id) is not None:
+            if stored_id is not None and (existing := guild.get_role(stored_id)) is not None:
+                await self._ensure_badge_icon(guild, existing, badge)
                 continue
             new_role = await create_badge_role(guild, badge)
             if new_role is None:
@@ -184,6 +206,18 @@ class BadgesCog(commands.Cog):
         if changed:
             await self.bot.configs.update(guild.id, GuildConfigUpdate(badge_role_ids=updated))
         return updated
+
+    @staticmethod
+    async def _ensure_badge_icon(guild: discord.Guild, role: discord.Role, badge: BadgeDefinition) -> None:
+        """Give an existing badge role its image once (e.g. after the guild reaches boost tier 2)."""
+        if role.icon is not None or ROLE_ICONS_FEATURE not in guild.features:
+            return
+        if (icon := badge_icon(badge.id)) is None:
+            return
+        try:
+            await role.edit(display_icon=icon, reason=f"Hall of Heroes badge icon: {badge.name}")
+        except discord.HTTPException:
+            logger.warning("Failed to set the icon on badge role %s in guild %s", badge.id, guild.id, exc_info=True)
 
     async def _apply_role_state(
         self, guild: discord.Guild, badge_role_ids: dict[str, int], role_state: list[BadgeRoleState]
@@ -255,10 +289,15 @@ class BadgesCog(commands.Cog):
     async def _announce_one(
         self, guild: discord.Guild, channel: discord.TextChannel, announcement: PendingBadgeAnnouncement
     ) -> bool:
-        embed = build_badge_embed(announcement, hall_of_heroes_url(_web_settings().BASE_URL))
+        icon = badge_icon(announcement.badge_id)
+        embed = build_badge_embed(
+            announcement, hall_of_heroes_url(_web_settings().BASE_URL), with_icon=icon is not None
+        )
         mention_target = guild.get_member(announcement.discord_id) or discord.Object(id=announcement.discord_id)
+        allowed = discord.AllowedMentions(users=[mention_target])
+        files = [discord.File(io.BytesIO(icon), BADGE_ICON_FILENAME)] if icon is not None else []
         try:
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=[mention_target]))
+            await channel.send(embed=embed, files=files, allowed_mentions=allowed)
         except discord.HTTPException:
             logger.warning(
                 "Failed to post badge announcement for %s in guild %s",

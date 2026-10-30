@@ -7,8 +7,11 @@ import discord
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.plugins.badges import (
+    BADGE_ICON_FILENAME,
+    ROLE_ICONS_FEATURE,
     BadgesCog,
     badge_grant_reason,
+    badge_icon,
     build_badge_embed,
     create_badge_role,
     hall_of_heroes_url,
@@ -133,15 +136,62 @@ class TestHallOfHeroesUrl:
 
 class TestBuildBadgeEmbed:
     def test_includes_mention_name_and_description(self) -> None:
-        embed = build_badge_embed(_announcement(), "https://sidequest-guild.com/heroes/")
+        embed = build_badge_embed(_announcement(), "https://sidequest-guild.com/heroes/", with_icon=True)
         assert "<@1>" in embed.description
         assert "Raid Regular" in embed.description
         assert "Attended 10 raids with the guild." in embed.description
 
     def test_includes_hall_of_heroes_link_field(self) -> None:
-        embed = build_badge_embed(_announcement(), "https://sidequest-guild.com/heroes/")
+        embed = build_badge_embed(_announcement(), "https://sidequest-guild.com/heroes/", with_icon=True)
         link_field = next(f for f in embed.fields if f.name == "Hall of Heroes")
         assert "https://sidequest-guild.com/heroes/" in link_field.value
+
+    def test_badge_image_is_the_thumbnail_and_replaces_the_emoji(self) -> None:
+        with_icon = build_badge_embed(_announcement(), "https://x/heroes/", with_icon=True)
+        without = build_badge_embed(_announcement(), "https://x/heroes/", with_icon=False)
+        assert with_icon.thumbnail.url == f"attachment://{BADGE_ICON_FILENAME}"
+        assert with_icon.title == "Badge earned!"
+        assert without.thumbnail.url is None
+        assert without.title != "Badge earned!"
+
+
+class TestBadgeIcons:
+    def test_every_badge_ships_a_png_icon(self) -> None:
+        """Each badge's role icon must be packaged with the bot, or recreated roles come back without one."""
+        for badge in BADGE_LIST:
+            icon = badge_icon(badge.id)
+            assert icon is not None, badge.id
+            assert icon.startswith(b"\x89PNG"), badge.id
+            assert len(icon) < 256 * 1024, badge.id  # Discord's role icon limit
+
+    async def test_new_role_gets_its_icon_when_the_guild_has_role_icons(self) -> None:
+        guild = _fake_guild()
+        guild.features = [ROLE_ICONS_FEATURE]
+        await create_badge_role(guild, BADGE_LIST[0])
+        assert guild.create_role.await_args.kwargs["display_icon"] == badge_icon(BADGE_LIST[0].id)
+
+    async def test_no_icon_without_the_boost_feature(self) -> None:
+        guild = _fake_guild()
+        guild.features = []
+        await create_badge_role(guild, BADGE_LIST[0])
+        assert guild.create_role.await_args.kwargs["display_icon"] is discord.utils.MISSING
+
+    async def test_existing_role_without_an_icon_gets_one_and_iconned_roles_are_left_alone(self) -> None:
+        existing = {badge.id: 1000 + i for i, badge in enumerate(BADGE_LIST)}
+        roles = [_fake_role(role_id) for role_id in existing.values()]
+        for role in roles:
+            role.icon = None
+            role.edit = AsyncMock()
+        roles[1].icon = MagicMock()
+        guild = _fake_guild(roles=roles)
+        guild.features = [ROLE_ICONS_FEATURE]
+        cog = _make_cog(configs=AsyncMock(), guilds=[guild])
+
+        await cog._ensure_badge_roles(guild, _config(badge_role_ids=existing))
+
+        assert roles[0].edit.await_args.kwargs["display_icon"] == badge_icon(BADGE_LIST[0].id)
+        roles[1].edit.assert_not_awaited()
+        guild.create_role.assert_not_awaited()
 
 
 class TestCreateBadgeRole:
@@ -295,6 +345,7 @@ class TestAnnouncePending:
         send_kwargs = channel.send.await_args.kwargs
         allowed_mentions = send_kwargs["allowed_mentions"]
         assert allowed_mentions.users == [member]
+        assert [f.filename for f in send_kwargs["files"]] == [BADGE_ICON_FILENAME]
         api.ack_badge.assert_awaited_once_with(guild.id, BadgeAck(discord_id=1, badge_id="raid_regular"))
 
     async def test_no_channel_configured_skips_posting_and_does_not_ack(self) -> None:

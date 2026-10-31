@@ -27,6 +27,11 @@ lives there.
 - **WoW: Forever news.** Every five minutes the bot checks Blizzard's own forum posts about WoW: Forever and
   Wowhead's WoW: Forever news, and posts each new one in the feed channel with a link to the full post.
 - **Class halls.** Pick a class in `#choose-your-class` and you join that class's post in `#class-halls`.
+- **Server emoji.** Every role icon is also a server emoji named after it: `:warrior:`, `:mage:` and the other
+  classes, the ranks such as `:quest_master:`, `:at_the_gate:`, and every badge such as `:first_steps:`. The bot adds
+  any that are missing when it starts. It never changes or deletes an emoji, and leaves a name alone if the server
+  already has an emoji called that. Delete one and it comes back at the next restart; rename it to keep it out of the
+  way.
 - **Commands for everyone:** `/rank [member]` shows a level and `/leaderboard` shows the top of the server.
 
 ## Commands for officers
@@ -68,8 +73,8 @@ the website's API running on your computer (see the
 [website README](https://github.com/SideQuest-Guild/website#run-it-on-your-computer)).
 
 In the Developer Portal, turn on the **Server Members** and **Message Content** intents. In the server, give the bot
-**Manage Events**, and for the events forum also **Manage Channels**, **Send Messages in Threads** and **Create
-Posts**.
+**Manage Events** and **Create Expressions** (for the role icon emoji), and for the events forum also **Manage
+Channels**, **Send Messages in Threads** and **Create Posts**.
 
 Put these in a `.env` file or in your shell:
 
@@ -95,7 +100,8 @@ tests start the real website API inside the test run, so they catch a change in 
 fail only on new errors. Known ones are listed in `pyrefly-baseline.json`, and `make type-baseline` updates it after
 you fix some.
 
-Each feature is one file in `src/sidequest_bot/plugins/`. The role icons are in `src/sidequest_bot/assets/role_icons/`.
+Each feature is one file in `src/sidequest_bot/plugins/`. The role icons are in `src/sidequest_bot/assets/role_icons/`;
+each one is a role icon and a server emoji named after the file.
 
 ## When the website changes
 

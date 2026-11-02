@@ -54,6 +54,7 @@ from sidequest_common.schemas import (
     SignupUpsert,
     VoicePresenceReport,
     WeeklyBoardEvent,
+    WeeklyBoardMessage,
     XPAwardResult,
 )
 
@@ -398,13 +399,17 @@ class SideQuestAPI:
         return _parse(Recruiting.model_validate, data)
 
     async def list_weekly_board_events(self, guild_id: int, start: datetime, end: datetime) -> list[WeeklyBoardEvent]:
-        """Scheduled events starting in ``[start, end)``, soonest first, with their forum thread id if any."""
+        """Scheduled events starting in ``[start, end)``, soonest first, with their forum thread id and sign-ups."""
         data = await self._request(
             "GET",
             f"{self._guild(guild_id)}/weekly-board/events",
             params={"start": start.isoformat(), "end": end.isoformat()},
         )
         return _parse(_WEEKLY_BOARD_EVENTS.validate_python, data)
+
+    async def set_weekly_board_message(self, guild_id: int, event_id: UUID, message: WeeklyBoardMessage) -> None:
+        """Record ``message`` as ``event_id``'s weekly-board card, so the event sync keeps its sign-ups current."""
+        await self._request("PUT", f"{self._guild(guild_id)}/weekly-board/events/{event_id}/message", body=message)
 
     # --- Live status
 

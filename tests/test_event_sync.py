@@ -14,6 +14,7 @@ import pytest
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.plugins.event_sync import (
+    MAX_CARD_FIELD_LENGTH,
     ChangeSignupDetailsButton,
     EventSignupButton,
     EventSyncCog,
@@ -28,7 +29,9 @@ from sidequest_bot.plugins.event_sync import (
     build_activity_line,
     build_change_custom_id,
     build_counts_line,
+    build_event_card,
     build_signup_custom_id,
+    build_signup_list,
     build_signup_view,
     build_starter_message,
     event_state,
@@ -36,6 +39,7 @@ from sidequest_bot.plugins.event_sync import (
     parse_signup_custom_id,
 )
 from sidequest_common.schemas import (
+    BoardSignup,
     DiscordEventPush,
     DiscordEventState,
     DiscordEventStatus,
@@ -1165,3 +1169,140 @@ class TestChangeSignupDetailsButton:
         (modal,) = interaction.response.send_modal.await_args.args
         assert modal._character_input.default == "Oakenshield"
         assert api.get_event_signup_by_discord.await_count == 1
+
+
+def _board_signup(discord_id: int, status: SignupStatus, **fields: object) -> BoardSignup:
+    return BoardSignup.model_validate({"status": status, "discord_id": discord_id, **fields})
+
+
+def _card(**overrides: object) -> tuple[discord.Embed, discord.ui.View]:
+    arguments: dict[str, object] = {
+        "event_id": uuid4(),
+        "kind": EventKind.SOCIAL,
+        "title": "Movie Night",
+        "location": "",
+        "starts_at": datetime(2026, 11, 5, 18, 0, tzinfo=UTC),
+        "notes": "",
+        "signups": [],
+        "detail_url": "https://sidequest-guild.com/events/detail/?id=abc",
+        "thread_url": None,
+        "state": "open",
+        "emoji": {},
+    }
+    arguments.update(overrides)
+    return build_event_card(**arguments)
+
+
+def _fields(embed: discord.Embed) -> dict[str, str]:
+    return {field.name or "": field.value or "" for field in embed.fields}
+
+
+class TestBuildEventCard:
+    def test_lists_going_maybe_and_cant_as_mentions(self) -> None:
+        signups = [
+            _board_signup(1, SignupStatus.SIGNED),
+            _board_signup(2, SignupStatus.TENTATIVE),
+            _board_signup(3, SignupStatus.SIGNED),
+            _board_signup(4, SignupStatus.ABSENT),
+        ]
+        embed, _view = _card(signups=signups)
+        assert _fields(embed) == {"✅ Going (2)": "<@1>\n<@3>", "❔ Maybe (1)": "<@2>", "❌ Can't (1)": "<@4>"}
+
+    def test_role_kind_splits_going_by_role_with_class_emoji(self) -> None:
+        signups = [
+            _board_signup(1, SignupStatus.SIGNED, wow_class=WowClass.WARRIOR, role=SignupRole.TANK),
+            _board_signup(2, SignupStatus.SIGNED, wow_class=WowClass.PRIEST, role=SignupRole.HEALER),
+            _board_signup(3, SignupStatus.TENTATIVE, wow_class=WowClass.MAGE, role=SignupRole.DPS),
+        ]
+        embed, _view = _card(kind=EventKind.RAID, signups=signups, emoji={WowClass.WARRIOR: "<:warrior:9>"})
+        assert _fields(embed) == {
+            "🛡️ Tanks (1)": "<:warrior:9> <@1>",
+            "💚 Healers (1)": "<@2>",
+            "⚔️ DPS (0)": "—",
+            "❔ Maybe (1)": "<@3>",
+            "❌ Can't (0)": "—",
+        }
+
+    def test_open_card_has_signup_buttons_and_links(self) -> None:
+        event_id = uuid4()
+        embed, view = _card(event_id=event_id, thread_url="https://discord.com/channels/42/555")
+        assert embed.url == "https://sidequest-guild.com/events/detail/?id=abc"
+        assert view.timeout is None
+        custom_ids = [getattr(item, "custom_id", None) for item in view.children]
+        assert custom_ids[:3] == [build_signup_custom_id(event_id, status) for status in SignupStatus]
+        links = {item.label: item.url for item in view.children if isinstance(item, discord.ui.Button) and item.url}
+        assert links == {
+            "More info": "https://sidequest-guild.com/events/detail/?id=abc",
+            "Thread": "https://discord.com/channels/42/555",
+        }
+
+    @pytest.mark.parametrize("state", ["cancelled", "ended"])
+    def test_closed_card_keeps_only_the_links(self, state: str) -> None:
+        embed, view = _card(state=state, signups=[_board_signup(1, SignupStatus.SIGNED)])
+        assert [item.label for item in view.children] == ["More info"]
+        assert _fields(embed)["✅ Going (1)"] == "<@1>"
+        assert embed.title == ("Cancelled: Movie Night" if state == "cancelled" else "Movie Night")
+
+    def test_leaves_out_the_apis_stand_in_location(self) -> None:
+        stand_in, _view = _card(location="World of Warcraft")
+        real, _view = _card(location="Goldshire Inn")
+        assert (stand_in.description or "").splitlines()[0] == "**Social**"
+        assert (real.description or "").splitlines()[0] == "**Social** · Goldshire Inn"
+
+
+class TestBuildSignupList:
+    def test_a_long_list_ends_in_a_count_of_who_is_left_out(self) -> None:
+        signups = [_board_signup(10**17 + index, SignupStatus.SIGNED) for index in range(100)]
+        text = build_signup_list(signups, {})
+        assert len(text) <= MAX_CARD_FIELD_LENGTH
+        shown = text.count("<@")
+        assert text.endswith(f"\n+{100 - shown} more")
+
+
+class TestUpdateBoardCard:
+    def _guild_with_card(self, message: MagicMock) -> MagicMock:
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.get_partial_message.return_value = message
+        guild = _fake_guild()
+        guild.emojis = []
+        guild.get_channel.return_value = channel
+        return guild
+
+    def _push_with_card(self) -> DiscordEventPush:
+        return _fake_push(discord_event_id=5).model_copy(
+            update={
+                "board_channel_id": 77,
+                "board_message_id": 88,
+                "board_signups": [_board_signup(1, SignupStatus.SIGNED, wow_class=WowClass.MAGE, role=SignupRole.DPS)],
+            }
+        )
+
+    async def test_push_redraws_the_card_with_its_signups(self) -> None:
+        message = MagicMock()
+        message.edit = AsyncMock()
+        guild = self._guild_with_card(message)
+        guild.fetch_scheduled_event.return_value = _fake_event(event_id=5)
+        api = AsyncMock()
+        cog = _make_cog(api=api)
+
+        await cog._apply_push(guild, self._push_with_card())
+
+        guild.get_channel.return_value.get_partial_message.assert_called_once_with(88)
+        embed = message.edit.await_args.kwargs["embed"]
+        assert _fields(embed)["⚔️ DPS (1)"] == "<@1>"
+        api.ack_event_push.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "error", [_discord_error(discord.NotFound, status=404), _discord_error(discord.HTTPException, status=500)]
+    )
+    async def test_a_failed_redraw_still_acks_the_push(self, error: discord.HTTPException) -> None:
+        message = MagicMock()
+        message.edit = AsyncMock(side_effect=error)
+        guild = self._guild_with_card(message)
+        guild.fetch_scheduled_event.return_value = _fake_event(event_id=5)
+        api = AsyncMock()
+        cog = _make_cog(api=api)
+
+        await cog._apply_push(guild, self._push_with_card())
+
+        api.ack_event_push.assert_awaited_once()

@@ -22,8 +22,9 @@ lives there.
 - **Badges.** Earn one on the [Hall of Heroes](https://sidequest-guild.com/heroes/) and the bot gives you its role
   and says so in chat.
 - **Away on a Quest.** Mark away dates on the website and you hold this role for those days.
-- **The weekly board.** Every Monday at 10:00 Central the bot posts the week's events in one message. A week with no
-  events gets no message.
+- **The weekly board.** Every Monday at 10:00 Central the bot posts a card for each of the week's events, with
+  Going, Maybe and Can't buttons, **More info** and **Thread** links, and who's going, maybe or can't. The cards keep
+  up as people sign up. A week with no events gets no cards.
 - **WoW: Forever news.** Every five minutes the bot checks Blizzard's own forum posts about WoW: Forever and
   Wowhead's WoW: Forever news, and posts each new one in the feed channel with a link to the full post.
 - **Class halls.** Pick a class in `#choose-your-class` and you join that class's post in `#class-halls`.

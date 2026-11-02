@@ -1,13 +1,19 @@
-"""Monday-morning weekly events board: one gold embed listing the week's scheduled events.
+"""Monday-morning weekly events board: one card per scheduled event, each with sign-up buttons and live lists.
 
 Every ``CHECK_INTERVAL_SECONDS``, for each guild with ``weekly_board_channel_id`` configured: once it's Monday at or
 after 10:00 America/Chicago and this week hasn't been posted yet (``GuildConfig.weekly_board_last_week``), fetch
 that week's scheduled events (Monday 00:00 to the following Monday 00:00 Chicago) via the bot-key
-``weekly-board/events`` endpoint and post one embed, in time order, with a Discord timestamp per event so every
-reader sees it in their own timezone. The week is then marked posted so a restart or a second tick that same
-Monday never double-posts; because posting only ever happens while it's still Monday, a bot that was down past
-10:00 catches up the moment it's back up that day, but never later in the week. An empty week posts nothing (the
-week is still marked handled, so the bot doesn't keep checking it for the rest of the day).
+``weekly-board/events`` endpoint and post one card per event, in time order, under a "This Week's Events" heading
+on the first. A card (``event_sync.build_event_card``) shows the event with Discord timestamps, so every reader sees
+it in their own timezone, who's going, maybe or can't (as @-mentions), Going/Maybe/Can't buttons and "More info"/
+"Thread" links. Each card's message is recorded with the API, so from then on the event sync redraws it whenever a
+sign-up changes.
+
+The week is then marked posted so a restart or a second tick that same Monday never double-posts; because posting
+only ever happens while it's still Monday, a bot that was down past 10:00 catches up the moment it's back up that
+day, but never later in the week. If the first card fails to post, nothing went out and the next tick retries; a
+later card that fails is skipped, so a retry never repeats the cards already posted. An empty week posts nothing
+(the week is still marked handled, so the bot doesn't keep checking it for the rest of the day).
 """
 
 import logging
@@ -22,16 +28,20 @@ from discord.ext import commands, tasks
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
-from sidequest_bot.lib.embeds import Colors, make_embed
-from sidequest_common.schemas import EVENT_KIND_LABELS, GuildConfigUpdate, WeeklyBoardEvent
+from sidequest_bot.plugins.event_sync import card_from_board_event
+from sidequest_common.schemas import GuildConfigUpdate, WeeklyBoardMessage
 from sidequest_common.settings import WebSettings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from sidequest_common.schemas import WeeklyBoardEvent
+
 logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL_SECONDS = 300
+MAX_PREVIEW_CARDS = 10
+"""Discord's embeds-per-message limit, for ``/weeklyboard preview``'s one ephemeral message."""
 
 GUILD_TZ: Final = ZoneInfo("America/Chicago")
 """US guild: the weekly board posts, and its week boundaries fall, on Central time."""
@@ -77,29 +87,17 @@ def should_post(now: datetime, last_week: str | None) -> date | None:
     return monday
 
 
-def _event_line(event: WeeklyBoardEvent, base_url: str, guild_id: int) -> str:
-    weekday = event.starts_at.astimezone(GUILD_TZ).strftime("%A")
-    kind_label = EVENT_KIND_LABELS[event.kind]
-    url = f"{base_url.rstrip('/')}/events/detail/?id={event.id}"
-    line = (
-        f"**{weekday}** {discord.utils.format_dt(event.starts_at, style='F')} "
-        f"({discord.utils.format_dt(event.starts_at, style='R')}) — {kind_label}: [{event.title}]({url})"
-    )
-    if event.discord_thread_id is not None:
-        line += f" · [Thread](https://discord.com/channels/{guild_id}/{event.discord_thread_id})"
-    return line
-
-
-def build_board_embed(
-    events: Sequence[WeeklyBoardEvent], monday: date, base_url: str, guild_id: int
-) -> discord.Embed | None:
-    """The board embed for ``monday``'s week, or ``None`` if ``events`` is empty (nothing is posted that week)."""
-    if not events:
-        return None
+def board_heading(monday: date) -> str:
+    """The heading on the week's first card, e.g. "## This Week's Events: Nov 2 - Nov 8"."""
     sunday = monday + timedelta(days=6)
-    title = f"This Week's Events: {monday:%b %-d} - {sunday:%b %-d}"
-    description = "\n".join(_event_line(event, base_url, guild_id) for event in events)
-    return make_embed(title, description, color=Colors.GOLD)
+    return f"## This Week's Events: {monday:%b %-d} - {sunday:%b %-d}"
+
+
+def build_board_cards(
+    events: Sequence[WeeklyBoardEvent], guild: discord.Guild, base_url: str
+) -> list[tuple[WeeklyBoardEvent, discord.Embed, discord.ui.View]]:
+    """Each event with its card, in the order given (soonest first)."""
+    return [(event, *card_from_board_event(event, guild=guild, base_url=base_url)) for event in events]
 
 
 class WeeklyBoardCog(commands.Cog):
@@ -153,14 +151,30 @@ class WeeklyBoardCog(commands.Cog):
     async def _post_board(self, guild: discord.Guild, channel: discord.TextChannel, monday: date) -> None:
         start, end = week_window(monday)
         events = await self.bot.api.list_weekly_board_events(guild.id, start, end)
-        embed = build_board_embed(events, monday, _web_settings().BASE_URL, guild.id)
-        if embed is not None:
+        for index, (event, embed, view) in enumerate(build_board_cards(events, guild, _web_settings().BASE_URL)):
             try:
-                await channel.send(embed=embed)
+                message = await channel.send(
+                    content=board_heading(monday) if index == 0 else None,
+                    embed=embed,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
             except discord.HTTPException:
-                logger.warning("Failed to post weekly board for guild %s", guild.id, exc_info=True)
-                return
+                logger.warning("Failed to post a weekly board card for guild %s", guild.id, exc_info=True)
+                if index == 0:
+                    return
+                continue
+            await self._record_card(guild, event, message)
         await self.bot.configs.update(guild.id, GuildConfigUpdate(weekly_board_last_week=monday.isoformat()))
+
+    async def _record_card(self, guild: discord.Guild, event: WeeklyBoardEvent, message: discord.Message) -> None:
+        """Tell the API which message is ``event``'s card; if that fails, the card just stops updating."""
+        try:
+            await self.bot.api.set_weekly_board_message(
+                guild.id, event.id, WeeklyBoardMessage(channel_id=message.channel.id, message_id=message.id)
+            )
+        except APIError:
+            logger.warning("Failed to record the weekly board card for event %s", event.id, exc_info=True)
 
     @weeklyboard_group.command(name="channel", description="Set (or clear) the channel for the weekly events board.")
     @app_commands.describe(channel="Channel to post the weekly board in; omit to disable.")
@@ -196,11 +210,16 @@ class WeeklyBoardCog(commands.Cog):
             logger.warning("Failed to fetch weekly board preview for guild %s", guild.id, exc_info=True)
             await interaction.followup.send("Couldn't reach the guild records; try again shortly.", ephemeral=True)
             return
-        embed = build_board_embed(events, monday, _web_settings().BASE_URL, guild.id)
-        if embed is None:
+        cards = build_board_cards(events, guild, _web_settings().BASE_URL)
+        if not cards:
             await interaction.followup.send("No events scheduled this week.", ephemeral=True)
             return
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        content = board_heading(monday)
+        if len(cards) > MAX_PREVIEW_CARDS:
+            content += f"\n-# The first {MAX_PREVIEW_CARDS} of {len(cards)} cards; the board posts them all."
+        await interaction.followup.send(
+            content=content, embeds=[embed for _event, embed, _view in cards[:MAX_PREVIEW_CARDS]], ephemeral=True
+        )
 
 
 async def setup(bot: SideQuestBot) -> None:

@@ -11,6 +11,9 @@ per guild event, tagged by kind, edited in place as the event changes, archived+
 and commented on as members sign up, go tentative, decline, or withdraw. The starter post also carries persistent
 Going/Maybe/Can't buttons (``EventSignupButton``) and a live counts line, so members can sign up from Discord and
 see it reflected on the site, and vice versa, within one sync cycle.
+
+An event with a weekly-board card (posted by ``weekly_board``) also gets that card redrawn on every push: the push
+then carries the card's message and every sign-up, so its Going/Maybe/Can't lists stay current.
 """
 
 import asyncio
@@ -20,7 +23,7 @@ import re
 from datetime import UTC, datetime
 from functools import lru_cache
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Final, Self, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, Self, cast
 from uuid import UUID
 
 import discord
@@ -29,9 +32,11 @@ from discord.ext import commands, tasks
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
+from sidequest_bot.lib.embeds import Colors
 from sidequest_common.schemas import (
     EVENT_KIND_LABELS,
     ROLE_KINDS,
+    BoardSignup,
     DiscordEventPush,
     DiscordEventReconcile,
     DiscordEventState,
@@ -50,7 +55,9 @@ from sidequest_common.schemas import (
 from sidequest_common.settings import WebSettings
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Sequence
+    from collections.abc import Coroutine, Mapping, Sequence
+
+    from sidequest_common.schemas import WeeklyBoardEvent
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +271,155 @@ def build_signup_view(event_id: UUID) -> discord.ui.View:
     for status in (SignupStatus.SIGNED, SignupStatus.TENTATIVE, SignupStatus.ABSENT):
         view.add_item(EventSignupButton(event_id, status))
     return view
+
+
+# --- Weekly-board event cards ----------------------------------------------------------------------------------
+
+CardState = Literal["open", "cancelled", "ended"]
+
+MAX_CARD_NOTES_LENGTH = 300
+MAX_CARD_FIELD_LENGTH = 850
+"""Per sign-up list. Discord allows 1024 a field but 6000 an embed, and a role-kind card can have six lists."""
+_API_DEFAULT_LOCATION = "World of Warcraft"
+"""What the API puts in ``push.location`` for an event with none; a card leaves it out, as it does on the board."""
+_CARD_COLORS: dict[CardState, discord.Colour] = {"open": Colors.GOLD, "cancelled": Colors.RED, "ended": Colors.SLATE}
+_CARD_STATE_BY_ACTION: dict[str, CardState] = {"upsert": "open", "cancel": "cancelled", "complete": "ended"}
+_STATUS_FIELD_NAMES: dict[SignupStatus, str] = {
+    SignupStatus.SIGNED: "✅ Going",
+    SignupStatus.TENTATIVE: "❔ Maybe",
+    SignupStatus.ABSENT: "❌ Can't",
+}
+_ROLE_FIELD_NAMES: dict[SignupRole, str] = {
+    SignupRole.TANK: "🛡️ Tanks",
+    SignupRole.HEALER: "💚 Healers",
+    SignupRole.DPS: "⚔️ DPS",
+}
+
+
+def class_emoji(guild: discord.Guild) -> dict[WowClass, str]:
+    """Each class's server emoji (``:warrior:`` and so on, which the ``emoji`` cog adds), where the server has one."""
+    by_name = {emoji.name: emoji for emoji in guild.emojis}
+    return {wow_class: str(by_name[wow_class.value]) for wow_class in WowClass if wow_class.value in by_name}
+
+
+def _signup_line(signup: BoardSignup, emoji: Mapping[WowClass, str]) -> str:
+    """``<@id>``, after the member's class emoji when they signed up with a class the server has an emoji for."""
+    mention = f"<@{signup.discord_id}>"
+    icon = emoji.get(signup.wow_class) if signup.wow_class is not None else None
+    return f"{icon} {mention}" if icon else mention
+
+
+def build_signup_list(signups: Sequence[BoardSignup], emoji: Mapping[WowClass, str]) -> str:
+    """One member per line, cut to ``MAX_CARD_FIELD_LENGTH`` with a closing "+N more"; "—" for nobody."""
+    if not signups:
+        return "—"
+    lines = [_signup_line(signup, emoji) for signup in signups]
+    for shown in range(len(lines), 0, -1):
+        hidden = len(lines) - shown
+        text = "\n".join(lines[:shown]) + (f"\n+{hidden} more" if hidden else "")
+        if len(text) <= MAX_CARD_FIELD_LENGTH:
+            return text
+    return f"+{len(lines)} more"
+
+
+def build_event_card(
+    *,
+    event_id: UUID,
+    kind: EventKind,
+    title: str,
+    location: str,
+    starts_at: datetime,
+    notes: str,
+    signups: Sequence[BoardSignup],
+    detail_url: str,
+    thread_url: str | None,
+    state: CardState,
+    emoji: Mapping[WowClass, str],
+) -> tuple[discord.Embed, discord.ui.View]:
+    """One event's weekly-board card: its details, who's going/maybe/can't, and the buttons under it.
+
+    Role kinds (raid, dungeon) split Going into tanks, healers and DPS. An open card has Going/Maybe/Can't buttons
+    (the forum starter post's ``EventSignupButton``) next to the "More info" and "Thread" links; a cancelled or
+    ended one keeps only the links.
+    """
+    header = f"**{EVENT_KIND_LABELS[kind]}**"
+    if location and location != _API_DEFAULT_LOCATION:
+        header += f" · {_truncate(location, 100)}"
+    lines = [
+        header,
+        f"{discord.utils.format_dt(starts_at, style='F')} ({discord.utils.format_dt(starts_at, style='R')})",
+    ]
+    if notes.strip():
+        lines += ["", _truncate(notes.strip(), MAX_CARD_NOTES_LENGTH)]
+    embed = discord.Embed(
+        title=_truncate(f"Cancelled: {title}" if state == "cancelled" else title, 256),
+        url=detail_url,
+        description="\n".join(lines),
+        colour=_CARD_COLORS[state],
+    )
+    going = [signup for signup in signups if signup.status == SignupStatus.SIGNED]
+    lists: list[tuple[str, list[BoardSignup]]] = []
+    if kind in ROLE_KINDS:
+        lists += [
+            (name, [signup for signup in going if signup.role == role]) for role, name in _ROLE_FIELD_NAMES.items()
+        ]
+        going = [signup for signup in going if signup.role is None]
+    if going or kind not in ROLE_KINDS:
+        lists.append((_STATUS_FIELD_NAMES[SignupStatus.SIGNED], going))
+    for status in (SignupStatus.TENTATIVE, SignupStatus.ABSENT):
+        lists.append((_STATUS_FIELD_NAMES[status], [signup for signup in signups if signup.status == status]))
+    for name, members in lists:
+        embed.add_field(name=f"{name} ({len(members)})", value=build_signup_list(members, emoji))
+    view = discord.ui.View(timeout=None)
+    if state == "open":
+        for status in (SignupStatus.SIGNED, SignupStatus.TENTATIVE, SignupStatus.ABSENT):
+            view.add_item(EventSignupButton(event_id, status))
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label="More info", url=detail_url))
+    if thread_url is not None:
+        view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label="Thread", url=thread_url))
+    return embed, view
+
+
+def _thread_url(guild_id: int, thread_id: int | None) -> str | None:
+    return None if thread_id is None else f"https://discord.com/channels/{guild_id}/{thread_id}"
+
+
+def card_from_board_event(
+    event: WeeklyBoardEvent, *, guild: discord.Guild, base_url: str
+) -> tuple[discord.Embed, discord.ui.View]:
+    """The card the weekly board first posts for ``event``."""
+    return build_event_card(
+        event_id=event.id,
+        kind=event.kind,
+        title=event.title,
+        location=event.location,
+        starts_at=event.starts_at,
+        notes=event.notes or "",
+        signups=event.signups,
+        detail_url=f"{base_url.rstrip('/')}/events/detail/?id={event.id}",
+        thread_url=_thread_url(guild.id, event.discord_thread_id),
+        state="open",
+        emoji=class_emoji(guild),
+    )
+
+
+def card_from_push(
+    push: DiscordEventPush, *, guild: discord.Guild, thread_id: int | None
+) -> tuple[discord.Embed, discord.ui.View]:
+    """``push``'s event card as it should look now, redrawn over the one the weekly board posted."""
+    return build_event_card(
+        event_id=push.event_id,
+        kind=push.kind,
+        title=push.title,
+        location=push.location,
+        starts_at=push.starts_at,
+        notes=_strip_description_footer(push.description),
+        signups=push.board_signups,
+        detail_url=push.signup_url,
+        thread_url=_thread_url(guild.id, thread_id),
+        state=_CARD_STATE_BY_ACTION[push.action],
+        emoji=class_emoji(guild),
+    )
 
 
 def _guess_class_from_roles(member: discord.Member) -> WowClass | None:
@@ -704,6 +860,7 @@ class EventSyncCog(commands.Cog):
         thread_id = await self._ensure_forum_post(guild, push, state, effective_discord_id)
         if thread_id is not None and effective_discord_id is not None:
             self._thread_ids[effective_discord_id] = thread_id
+        await self._update_board_card(guild, push, thread_id)
         ack = DiscordPushAck(push_hash=push.push_hash, event=state, thread_id=thread_id)
         await self.bot.api.ack_event_push(guild.id, push.event_id, ack)
 
@@ -889,6 +1046,33 @@ class EventSyncCog(commands.Cog):
         if guild_id not in self._forum_forbidden_guild_ids:
             logger.warning("Missing permission to manage the events forum in guild %s", guild_id)
             self._forum_forbidden_guild_ids.add(guild_id)
+
+    # --- Weekly-board cards -----------------------------------------------------------------------------------
+
+    async def _update_board_card(self, guild: discord.Guild, push: DiscordEventPush, thread_id: int | None) -> None:
+        """Redraw ``push``'s weekly-board card, if it has one.
+
+        Never raises: by now the push may have created a forum thread, and only the ack records it, so a failure
+        here must not stop the ack (a retried push would make a second thread). A card that failed to redraw catches
+        up on the event's next change; a deleted one is simply left alone.
+        """
+        if push.board_channel_id is None or push.board_message_id is None:
+            return
+        channel = guild.get_channel(push.board_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        embed, view = card_from_push(push, guild=guild, thread_id=thread_id)
+        try:
+            await channel.get_partial_message(push.board_message_id).edit(embed=embed, view=view)
+        except discord.NotFound:
+            pass
+        except discord.HTTPException:
+            logger.warning(
+                "Failed to update the weekly board card for event %s in guild %s",
+                push.event_id,
+                guild.id,
+                exc_info=True,
+            )
 
     # --- Sign-up activity -> forum comments --------------------------------------------------------------------
 

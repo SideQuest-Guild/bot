@@ -1,4 +1,4 @@
-"""Unit tests for the weekly-board plugin: week window math, idempotency, and embed content."""
+"""Unit tests for the weekly-board plugin: week window math, idempotency, and posting one card per event."""
 
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
@@ -13,7 +13,7 @@ from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.plugins.weekly_board import (
     GUILD_TZ,
     WeeklyBoardCog,
-    build_board_embed,
+    board_heading,
     should_post,
     week_monday,
     week_window,
@@ -92,35 +92,9 @@ class TestShouldPost:
         assert should_post(now, last_week="2026-10-26") is None
 
 
-class TestBuildBoardEmbed:
-    def test_empty_week_posts_nothing(self) -> None:
-        assert build_board_embed([], date(2026, 11, 2), "https://sidequest-guild.com", 42) is None
-
-    def test_embed_lists_events_in_order_with_links_and_timestamps(self) -> None:
-        events = [
-            _event(title="Molten Core", starts_at=datetime(2026, 11, 3, 19, 0, tzinfo=UTC)),
-            _event(
-                title="Heroic Dungeons",
-                kind=EventKind.DUNGEON,
-                starts_at=datetime(2026, 11, 5, 19, 0, tzinfo=UTC),
-                discord_thread_id=555,
-            ),
-        ]
-        event_ids = [str(e.id) for e in events]
-        embed = build_board_embed(events, date(2026, 11, 2), "https://sidequest-guild.com/", 42)
-        assert embed is not None
-        assert embed.title == "This Week's Events: Nov 2 - Nov 8"
-        assert embed.colour == discord.Colour(0xF1C40F)
-        description = embed.description or ""
-        assert description.index(event_ids[0]) < description.index(event_ids[1])
-        assert f"https://sidequest-guild.com/events/detail/?id={event_ids[0]}" in description
-        assert "Raid: [Molten Core]" in description
-        assert "Dungeon: [Heroic Dungeons]" in description
-        assert "https://discord.com/channels/42/555" in description
-        assert "[Thread]" in description
-        timestamp = int(events[0].starts_at.timestamp())
-        assert f"<t:{timestamp}:F>" in description
-        assert f"<t:{timestamp}:R>" in description
+class TestBoardHeading:
+    def test_names_the_monday_to_sunday_week(self) -> None:
+        assert board_heading(date(2026, 11, 2)) == "## This Week's Events: Nov 2 - Nov 8"
 
 
 def _make_cog(*, api: object, guilds: list[object] | None = None, last_week: str | None = None) -> WeeklyBoardCog:
@@ -134,32 +108,92 @@ def _make_cog(*, api: object, guilds: list[object] | None = None, last_week: str
 def _fake_guild(*, guild_id: int = 42, channel: object | None = None) -> MagicMock:
     guild = MagicMock(spec=discord.Guild)
     guild.id = guild_id
+    guild.emojis = []
     guild.get_channel.return_value = channel
     return guild
 
 
-def _fake_channel() -> MagicMock:
+def _fake_channel(*, send_errors: dict[int, discord.HTTPException] | None = None) -> MagicMock:
+    """A board channel whose ``send`` returns message ids 1000, 1001, ..., or raises ``send_errors[index]``."""
     channel = MagicMock(spec=discord.TextChannel)
-    channel.send = AsyncMock()
+    channel.id = 777
+    sent: list[int] = []
+
+    async def send(**_kwargs: object) -> SimpleNamespace:
+        index = len(sent)
+        sent.append(index)
+        if send_errors and index in send_errors:
+            raise send_errors[index]
+        return SimpleNamespace(id=1000 + index, channel=channel)
+
+    channel.send = AsyncMock(side_effect=send)
     return channel
 
 
+def _http_error() -> discord.HTTPException:
+    return discord.HTTPException(MagicMock(status=500, reason="boom"), "boom")
+
+
+async def _check_on_monday(cog: WeeklyBoardCog, guild: MagicMock) -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(discord.utils, "utcnow", lambda: datetime(2026, 11, 2, 16, 0, tzinfo=UTC))
+        await cog._check_guild(guild)
+
+
 class TestCheckGuild:
-    async def test_posts_and_marks_the_week_handled(self) -> None:
+    async def test_posts_a_card_per_event_records_each_and_marks_the_week_handled(self) -> None:
         channel = _fake_channel()
         guild = _fake_guild(channel=channel)
+        events = [_event(title="Molten Core"), _event(title="Heroics", kind=EventKind.DUNGEON)]
         api = AsyncMock()
-        api.list_weekly_board_events.return_value = [_event()]
+        api.list_weekly_board_events.return_value = events
         cog = _make_cog(api=api, last_week=None)
 
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(discord.utils, "utcnow", lambda: datetime(2026, 11, 2, 16, 0, tzinfo=UTC))
-            await cog._check_guild(guild)
+        await _check_on_monday(cog, guild)
+
+        sends = [call.kwargs for call in channel.send.await_args_list]
+        assert [send["embed"].title for send in sends] == ["Molten Core", "Heroics"]
+        assert [send["content"] for send in sends] == ["## This Week's Events: Nov 2 - Nov 8", None]
+        recorded = [(call.args[1], call.args[2].message_id) for call in api.set_weekly_board_message.await_args_list]
+        assert recorded == [(events[0].id, 1000), (events[1].id, 1001)]
+        update_arg = cog.bot.configs.update.await_args.args[1]
+        assert update_arg.weekly_board_last_week == "2026-11-02"
+
+    async def test_a_failed_first_card_leaves_the_week_to_retry(self) -> None:
+        channel = _fake_channel(send_errors={0: _http_error()})
+        api = AsyncMock()
+        api.list_weekly_board_events.return_value = [_event(), _event()]
+        cog = _make_cog(api=api, last_week=None)
+
+        await _check_on_monday(cog, _fake_guild(channel=channel))
+
+        assert channel.send.await_count == 1
+        cog.bot.configs.update.assert_not_awaited()
+
+    async def test_a_failed_later_card_is_skipped_so_a_retry_never_reposts(self) -> None:
+        channel = _fake_channel(send_errors={1: _http_error()})
+        events = [_event(), _event(), _event()]
+        api = AsyncMock()
+        api.list_weekly_board_events.return_value = events
+        cog = _make_cog(api=api, last_week=None)
+
+        await _check_on_monday(cog, _fake_guild(channel=channel))
+
+        assert channel.send.await_count == 3
+        assert [call.args[1] for call in api.set_weekly_board_message.await_args_list] == [events[0].id, events[2].id]
+        cog.bot.configs.update.assert_awaited_once()
+
+    async def test_a_card_the_api_cannot_record_is_still_posted(self) -> None:
+        channel = _fake_channel()
+        api = AsyncMock()
+        api.list_weekly_board_events.return_value = [_event()]
+        api.set_weekly_board_message.side_effect = NotFoundError(404, "old API pod")
+        cog = _make_cog(api=api, last_week=None)
+
+        await _check_on_monday(cog, _fake_guild(channel=channel))
 
         channel.send.assert_awaited_once()
         cog.bot.configs.update.assert_awaited_once()
-        update_arg = cog.bot.configs.update.await_args.args[1]
-        assert update_arg.weekly_board_last_week == "2026-11-02"
 
     async def test_does_not_double_post_the_same_week(self) -> None:
         channel = _fake_channel()

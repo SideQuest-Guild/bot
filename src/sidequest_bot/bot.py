@@ -66,6 +66,12 @@ class SideQuestBot(commands.Bot):
         """Log the identity we connected as."""
         logger.info("Connected as %s (%s) to %d guild(s)", self.user, getattr(self.user, "id", "?"), len(self.guilds))
 
+    async def on_message(self, message: discord.Message, /) -> None:
+        """Do nothing: commands are slash-only, and parsing a mention as a prefix command logs CommandNotFound.
+
+        Cog ``on_message`` listeners still run.
+        """
+
     async def send_log(self, guild: discord.Guild, embed: discord.Embed) -> discord.Message | None:
         """Post ``embed`` to the guild's configured log channel. No-op if unset, missing, or not writable."""
         config = await self.configs.get(guild.id)

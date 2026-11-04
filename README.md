@@ -17,8 +17,18 @@ lives there.
   *Battle-Tagged*. When a Quest Master confirms you are in the guild in game, you get *New Arrival* and the guild
   channels open. Until you sign in you hold *At the Gate* and see only the sign-in channel.
 - **A welcome DM** when you first sign in, and a pinned **Start here** button in `#guest-chat` that shows it again.
-- **Chat levels.** Each message earns 15 to 25 XP, at most once a minute. Level roles from *Lv 5 · Wayfarer* to
-  *Lv 50 · Legend* come on their own.
+- **Levels.** XP comes from four places:
+  - **Chat:** 15 to 25 XP per message, at most once a minute.
+  - **Voice:** 5 XP a minute while you're in a voice channel with at least one other member and not deafened. The
+    AFK channel doesn't count.
+  - **Events:** 150 XP for each guild event you attend, once an officer marks you as came. If nobody takes
+    attendance, signing up as Going counts a day after the event starts.
+  - **#lfg groups:** 50 XP for each group you spend ten minutes or more in, once the group ends.
+
+  Event and group XP is checked every five minutes, and each event or group pays once. Level-ups from voice are
+  announced in the voice channel's chat; from events and groups, in the server's system channel. A level-up
+  channel set with `/levels` overrides both. Level roles from *Lv 5 · Wayfarer* to *Lv 50 · Legend* come on their
+  own. No-XP channels and roles apply to everything.
 - **Badges.** Earn one on the [Hall of Heroes](https://sidequest-guild.com/heroes/) and the bot gives you its role
   and says so in chat.
 - **Away on a Quest.** Mark away dates on the website and you hold this role for those days.
@@ -61,7 +71,7 @@ Server Settings, Integrations. Settings are saved in the API and apply at once.
 | `/away role <role>` | Manage Server | Picks the away role. |
 | `/welcome ...` | Manage Server | The welcome message in `#general` and the role new members get. `/welcome test` shows it. |
 | `/logging channel`, `/logging status` | Manage Server | Where edits, deletes, joins, leaves, role changes and voice moves are logged. |
-| `/levels ...` | Manage Server | Level rewards, XP range, cooldown, level-up messages, and channels or roles that earn no XP. |
+| `/levels ...` | Manage Server | Level rewards, chat XP range, cooldown, level-up messages, and channels or roles that earn no XP (chat, voice, events or groups). |
 | `/rolemenu ...` | Manage Roles | Button panels that let members pick their own roles. |
 | `/warn`, `/timeout`, `/untimeout` | Timeout Members | Each one DMs the member, opens a numbered case and logs it. |
 | `/kick` | Kick Members | As above. |

@@ -59,9 +59,12 @@ from sidequest_common.schemas import (
     SignupNoticesPage,
     SignupUpsert,
     VoicePresenceReport,
+    VoiceXPRequest,
     WeeklyBoardEvent,
     WeeklyBoardMessage,
+    XPActivityReport,
     XPAwardResult,
+    XPGrantResult,
 )
 
 if TYPE_CHECKING:
@@ -84,6 +87,7 @@ _MEMBER_LINKS = TypeAdapter(list[MemberLink])
 _ROLE_RESETS = TypeAdapter(list[RoleResetCandidate])
 _WEEKLY_BOARD_EVENTS = TypeAdapter(list[WeeklyBoardEvent])
 _GROUP_SESSIONS = TypeAdapter(list[GroupSessionSchema])
+_XP_GRANTS = TypeAdapter(list[XPGrantResult])
 
 
 class APIError(Exception):
@@ -239,6 +243,16 @@ class SideQuestAPI:
         """Overwrite a member's XP total; level is recomputed."""
         data = await self._request("PUT", f"{self._guild(guild_id)}/members/{user_id}/xp", body=SetXPRequest(xp=xp))
         return _parse(MemberLevelSchema.model_validate, data)
+
+    async def grant_voice_xp(self, guild_id: int, request: VoiceXPRequest) -> list[XPGrantResult]:
+        """Voice XP for members the bot found eligible this minute."""
+        data = await self._request("POST", f"{self._guild(guild_id)}/xp/voice", body=request)
+        return _parse(_XP_GRANTS.validate_python, data)
+
+    async def sync_activity_xp(self, guild_id: int) -> XPActivityReport:
+        """Pay any newly earned event and #lfg group XP (idempotent; safe to poll)."""
+        data = await self._request("POST", f"{self._guild(guild_id)}/xp/activity")
+        return _parse(XPActivityReport.model_validate, data)
 
     async def get_rank(self, guild_id: int, user_id: int) -> RankSchema:
         """A member's rank; members without XP get ``rank=None`` and zeros."""

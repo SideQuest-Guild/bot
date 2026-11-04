@@ -1,4 +1,10 @@
-"""Leveling: XP on chat, level-up announcements and role rewards, `/rank`, `/leaderboard`, `/levels` admin."""
+"""Leveling: XP for chat, voice, events and #lfg groups, level-ups and level roles, `/rank`, `/leaderboard`, `/levels`.
+
+Chat XP is per message (``on_message``). Every minute, members in voice with someone else, not deafened, outside the
+AFK channel and no-XP channels or roles get voice XP. Every five minutes the API pays any newly earned event and group
+XP. The API sets the amounts (``VOICE_XP_PER_MINUTE``, ``EVENT_XP``, ``GROUP_XP``) and keeps each event and group to
+one payout; the bot only decides who's in voice and announces the level-ups.
+"""
 
 import logging
 import math
@@ -6,23 +12,31 @@ from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
-from sidequest_bot.api_client import APIError
+from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.embeds import Colors, make_embed
 from sidequest_bot.lib.roles import configure_block_reason, grant_block_reason
-from sidequest_common.schemas import GuildConfigUpdate
+from sidequest_common.schemas import GuildConfigUpdate, VoiceXPRequest, XPAwardResult
 from sidequest_common.schemas.levels import MAX_XP  # noqa: TC001  # used at runtime in app_commands.Range
 from sidequest_common.templates import TEMPLATE_PLACEHOLDERS, render_template
 
 if TYPE_CHECKING:
-    from sidequest_common.schemas import GuildConfigSchema, XPAwardResult
+    from collections.abc import Iterable
+
+    from sidequest_common.schemas import GuildConfigSchema, XPGrantResult
 
 logger = logging.getLogger(__name__)
 
 LEADERBOARD_PAGE_SIZE = 10
 PROGRESS_BAR_LENGTH = 12
+VOICE_TICK_SECONDS = 60
+ACTIVITY_SYNC_SECONDS = 300
+MIN_VOICE_COMPANY = 2
+"""Members who must be listening in a channel for any of them to earn voice XP, so sitting alone earns nothing."""
+
+type VoiceChannel = discord.VoiceChannel | discord.StageChannel
 
 
 def render_progress_bar(current: int, total: int, *, length: int = PROGRESS_BAR_LENGTH) -> str:
@@ -62,11 +76,70 @@ def is_xp_eligible(message: discord.Message, config: GuildConfigSchema) -> bool:
     return not author_role_ids & set(config.no_xp_role_ids)
 
 
+def _listening(member: discord.Member) -> bool:
+    voice = member.voice
+    return voice is not None and not (voice.self_deaf or voice.deaf)
+
+
+def voice_xp_earners(guild: discord.Guild, config: GuildConfigSchema) -> dict[int, VoiceChannel]:
+    """Members earning voice XP this minute, each with the channel they're in.
+
+    A channel counts when at least ``MIN_VOICE_COMPANY`` non-bot members in it aren't deafened, and it isn't the AFK
+    channel or a no-XP channel (or in a no-XP category). Members holding a no-XP role are left out.
+    """
+    if not config.leveling_enabled:
+        return {}
+    afk_id = guild.afk_channel.id if guild.afk_channel is not None else None
+    no_xp_channels = set(config.no_xp_channel_ids)
+    no_xp_roles = set(config.no_xp_role_ids)
+    earners: dict[int, VoiceChannel] = {}
+    for channel in (*guild.voice_channels, *guild.stage_channels):
+        if channel.id == afk_id or {channel.id, channel.category_id} & no_xp_channels:
+            continue
+        listening = [member for member in channel.members if not member.bot and _listening(member)]
+        if len(listening) < MIN_VOICE_COMPANY:
+            continue
+        for member in listening:
+            if not {role.id for role in member.roles} & no_xp_roles:
+                earners[member.id] = channel
+    return earners
+
+
+def merge_grants(grants: Iterable[XPGrantResult]) -> dict[int, XPAwardResult]:
+    """One result per member, so two grants in one sync announce one level-up with every role change."""
+    merged: dict[int, XPAwardResult] = {}
+    for grant in grants:
+        previous = merged.get(grant.user_id)
+        if previous is None:
+            merged[grant.user_id] = XPAwardResult.model_validate(grant.model_dump(exclude={"user_id", "source"}))
+            continue
+        removed = {*previous.remove_role_ids, *grant.remove_role_ids}
+        earned = [role_id for role_id in (*previous.earned_role_ids, *grant.earned_role_ids) if role_id not in removed]
+        merged[grant.user_id] = XPAwardResult(
+            awarded=True,
+            amount=previous.amount + grant.amount,
+            xp=grant.xp,
+            level=grant.level,
+            previous_level=previous.previous_level,
+            leveled_up=grant.level > previous.previous_level,
+            earned_role_ids=list(dict.fromkeys(earned)),
+            remove_role_ids=sorted(removed),
+        )
+    return merged
+
+
 class LevelingCog(commands.Cog):
-    """Awards XP for chat activity and announces/applies level-ups."""
+    """Awards XP for chat and voice, pays event and group XP, and announces/applies level-ups."""
 
     def __init__(self, bot: SideQuestBot) -> None:
         self.bot = bot
+        self._voice_tick.start()
+        self._activity_sync.start()
+
+    async def cog_unload(self) -> None:
+        """Stop the voice and activity loops."""
+        self._voice_tick.cancel()
+        self._activity_sync.cancel()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -81,47 +154,101 @@ class LevelingCog(commands.Cog):
         except APIError:
             logger.warning("Failed to award XP for message %s", message.id, exc_info=True)
             return
-        if not result.leveled_up:
-            return
-        try:
-            await self._handle_level_up(message, config, result)
-        except discord.HTTPException:
-            logger.warning("Failed to announce or apply level-up for message %s", message.id, exc_info=True)
+        if result.leveled_up and isinstance(message.author, discord.Member):
+            await self.handle_level_up(message.guild, message.author, config, result, fallback=message.channel)
 
-    async def _handle_level_up(
-        self, message: discord.Message, config: GuildConfigSchema, result: XPAwardResult
-    ) -> None:
-        guild = message.guild
-        if guild is None:
+    @tasks.loop(seconds=VOICE_TICK_SECONDS)
+    async def _voice_tick(self) -> None:
+        for guild in list(self.bot.guilds):
+            try:
+                await self.grant_voice_xp(guild)
+            except NotFoundError:
+                logger.info("Voice XP route not available yet for guild %s; retrying next minute", guild.id)
+            except APIError:
+                # Must not escape: an unhandled exception stops a tasks.loop for good.
+                logger.warning("Voice XP failed for guild %s", guild.id, exc_info=True)
+
+    @_voice_tick.before_loop
+    async def _before_voice_tick(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def grant_voice_xp(self, guild: discord.Guild) -> None:
+        """Give this minute's voice XP and announce any level-ups in the level-up channel or the voice chat."""
+        config = await self.bot.configs.get(guild.id)
+        earners = voice_xp_earners(guild, config)
+        if not earners:
             return
+        grants = await self.bot.api.grant_voice_xp(guild.id, VoiceXPRequest(user_ids=sorted(earners)))
+        for user_id, result in merge_grants(grants).items():
+            member = guild.get_member(user_id)
+            if result.leveled_up and member is not None:
+                await self.handle_level_up(guild, member, config, result, fallback=earners.get(user_id))
+
+    @tasks.loop(seconds=ACTIVITY_SYNC_SECONDS)
+    async def _activity_sync(self) -> None:
+        for guild in list(self.bot.guilds):
+            try:
+                await self.sync_activity_xp(guild)
+            except NotFoundError:
+                # Not the site guild, or an API pod without the route yet mid-deploy. Retried next time either way.
+                logger.info("Activity XP not available for guild %s", guild.id)
+            except APIError:
+                logger.warning("Activity XP sync failed for guild %s", guild.id, exc_info=True)
+
+    @_activity_sync.before_loop
+    async def _before_activity_sync(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def sync_activity_xp(self, guild: discord.Guild) -> None:
+        """Collect event and group XP; announce level-ups in the level-up channel or the server's system channel."""
+        report = await self.bot.api.sync_activity_xp(guild.id)
+        if not report.grants:
+            return
+        config = await self.bot.configs.get(guild.id)
+        for user_id, result in merge_grants(report.grants).items():
+            member = guild.get_member(user_id)
+            if result.leveled_up and member is not None:
+                await self.handle_level_up(guild, member, config, result, fallback=guild.system_channel)
+
+    async def handle_level_up(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        config: GuildConfigSchema,
+        result: XPAwardResult,
+        *,
+        fallback: discord.abc.Messageable | None,
+    ) -> None:
+        """Post the level-up message (to the level-up channel if set, else ``fallback``) and apply level roles."""
         text = render_template(
             config.level_up_message,
-            mention=message.author.mention,
-            user=message.author.display_name,
+            mention=member.mention,
+            user=member.display_name,
             guild=guild.name,
             level=result.level,
         )
-        target: discord.abc.Messageable = message.channel
+        target = fallback
         if config.level_up_channel_id is not None:
             channel = guild.get_channel_or_thread(config.level_up_channel_id)
             if isinstance(channel, discord.abc.Messageable):
                 target = channel
-        try:
-            await target.send(text, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
-        except discord.HTTPException:
-            logger.warning("Failed to post level-up announcement for message %s", message.id, exc_info=True)
+        if target is not None:
+            try:
+                await target.send(
+                    text, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
+                )
+            except discord.HTTPException:
+                logger.warning("Failed to post level-up announcement for %s in guild %s", member.id, guild.id)
         if result.earned_role_ids or result.remove_role_ids:
-            await self._apply_role_deltas(guild, message.author, result.earned_role_ids, result.remove_role_ids)
+            await self._apply_role_deltas(guild, member, result.earned_role_ids, result.remove_role_ids)
 
     async def _apply_role_deltas(
         self,
         guild: discord.Guild,
-        member: discord.User | discord.Member,
+        member: discord.Member,
         earned_role_ids: list[int],
         remove_role_ids: list[int],
     ) -> None:
-        if not isinstance(member, discord.Member):
-            return
         to_add = [
             role
             for role_id in earned_role_ids
@@ -137,8 +264,8 @@ class LevelingCog(commands.Cog):
                 await member.add_roles(*to_add, reason="Level-up reward")
             if to_remove:
                 await member.remove_roles(*to_remove, reason="Level-up role cleanup")
-        except discord.Forbidden:
-            logger.warning("Missing permission to update level roles in guild %s", guild.id, exc_info=True)
+        except discord.HTTPException:
+            logger.warning("Couldn't update level roles for %s in guild %s", member.id, guild.id, exc_info=True)
 
 
 # --- /rank, /leaderboard

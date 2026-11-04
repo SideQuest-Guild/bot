@@ -881,8 +881,6 @@ class GroupFinderCog(commands.Cog):
         except discord.HTTPException:
             logger.warning("Failed to post the LFG panel in guild %s", guild.id, exc_info=True)
             return
-        with contextlib.suppress(discord.HTTPException):
-            await message.pin(reason="LFG panel")
         await self.bot.configs.update(guild.id, GuildConfigUpdate(lfg_panel_message_id=message.id))
 
     # --- Spawning ----------------------------------------------------------------------------------------------

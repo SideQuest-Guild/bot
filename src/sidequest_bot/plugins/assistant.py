@@ -811,9 +811,22 @@ async def _replied_to(message: discord.Message) -> discord.Message | None:
         return None
 
 
+def mentions_bot(message: discord.Message, bot_id: int) -> bool:
+    """Whether ``message`` mentions the bot, as a user or through its own role.
+
+    Discord's autocomplete often turns "@Game Master" into the bot's managed role rather than the bot itself.
+    """
+    if any(user.id == bot_id for user in message.mentions):
+        return True
+    own_role = message.guild.self_role if message.guild else None
+    return own_role is not None and own_role.id in message.raw_role_mentions
+
+
 async def build_prompt(message: discord.Message, bot_id: int) -> str:
     """The request as the model sees it: who asked, where, what, and the message they replied to."""
-    text = re.sub(rf"<@!?{bot_id}>", "", message.content).strip()
+    own_role = message.guild.self_role if message.guild else None
+    mention = rf"<@!?{bot_id}>" + (rf"|<@&{own_role.id}>" if own_role else "")
+    text = re.sub(mention, "", message.content).strip()
     channel_name = getattr(message.channel, "name", "a thread")
     lines = [
         f"{message.author.display_name} (id {message.author.id}) wrote in #{channel_name}:",
@@ -943,7 +956,7 @@ class AssistantCog(commands.Cog):
         guild = message.guild
         if me is None or guild is None or author.bot or not isinstance(author, discord.Member):
             return
-        if all(user.id != me.id for user in message.mentions):
+        if not mentions_bot(message, me.id):
             return
         if not clicker_is_gm({role.id for role in author.roles}, self.gm_role_ids):
             return

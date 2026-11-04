@@ -98,6 +98,7 @@ def make_guild(roles: list[MagicMock], channels: list[MagicMock], members: list[
     guild.channels = channels
     guild.members = members
     guild.default_role = roles[0]
+    guild.self_role = None  # the bot's managed role; tests that need one set it
     guild.get_role.side_effect = lambda role_id: next((r for r in guild.roles if r.id == role_id), None)
     guild.get_channel.side_effect = lambda cid: next((c for c in guild.channels if c.id == cid), None)
     guild.get_member.side_effect = lambda mid: next((m for m in guild.members if m.id == mid), None)

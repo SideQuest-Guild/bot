@@ -138,6 +138,7 @@ def _message(guild: MagicMock, author: MagicMock, text: str, reply_to: tuple[Mag
     message.channel = MagicMock()
     message.channel.name = "officer-chat"
     message.reference = None
+    message.raw_role_mentions = []
     if reply_to is not None:
         replied = MagicMock(spec=discord.Message)
         replied.author, replied.content = reply_to

@@ -1,6 +1,7 @@
 """The AI helper: Quest Masters ask, the model proposes additive changes, a Quest Master approves, the bot does them."""
 
 import json
+import re
 from itertools import count
 from types import SimpleNamespace
 from typing import Any
@@ -293,6 +294,7 @@ def _message(guild: MagicMock, author: MagicMock, content: str) -> MagicMock:
     message.author = author
     message.content = content
     message.mentions = [SimpleNamespace(id=BOT_ID)] if f"<@{BOT_ID}>" in content else []
+    message.raw_role_mentions = [int(role_id) for role_id in re.findall(r"<@&(\d+)>", content)]
     message.reference = None
     message.channel = MagicMock()
     message.channel.name = "officers"
@@ -316,6 +318,20 @@ class TestCog:
         llm = FakeLLM()
         await _cog(llm).on_message(_message(guild, _member_by_id(guild, COFFEE), "we need a voice channel"))
         assert llm.sent == []
+
+    async def test_answers_when_autocomplete_picked_the_bots_own_role(self, guild: MagicMock) -> None:
+        guild.self_role = make_role(77, "Game Master")
+        guild.self_role.managed = True
+        llm, other = FakeLLM(_model_turn("Which category should it go in?")), FakeLLM()
+        coffee = _member_by_id(guild, COFFEE)
+
+        await _cog(llm).on_message(_message(guild, coffee, "<@&77> make a channel for transmog"))
+        await _cog(other).on_message(_message(guild, coffee, f"<@&{GM_ROLE}> anyone around?"))
+
+        assert len(llm.sent) == 1
+        assert "<@&77>" not in llm.sent[0][1]["content"]
+        assert "make a channel for transmog" in llm.sent[0][1]["content"]
+        assert other.sent == [], "answered a mention of some other role"
 
     async def test_quest_master_gets_a_plan_to_approve(self, guild: MagicMock) -> None:
         llm = FakeLLM(

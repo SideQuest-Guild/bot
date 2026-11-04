@@ -40,6 +40,8 @@ from sidequest_common.schemas import (
     MemberListing,
     MemberProfileIn,
     MemberProfilesReplace,
+    MessageBackfill,
+    MessageBackfillResult,
     ModCaseCreate,
     ModCaseSchema,
     ModCaseUpdate,
@@ -253,6 +255,11 @@ class SideQuestAPI:
         """Pay any newly earned event and #lfg group XP (idempotent; safe to poll)."""
         data = await self._request("POST", f"{self._guild(guild_id)}/xp/activity")
         return _parse(XPActivityReport.model_validate, data)
+
+    async def backfill_messages(self, guild_id: int, request: MessageBackfill) -> MessageBackfillResult:
+        """Push message counts read once from channel history (idempotent; keeps ``max(existing, reported)``)."""
+        data = await self._request("PUT", f"{self._guild(guild_id)}/activity/messages", body=request)
+        return _parse(MessageBackfillResult.model_validate, data)
 
     async def get_rank(self, guild_id: int, user_id: int) -> RankSchema:
         """A member's rank; members without XP get ``rank=None`` and zeros."""

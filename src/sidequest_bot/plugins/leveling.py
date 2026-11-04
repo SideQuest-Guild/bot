@@ -46,7 +46,7 @@ def render_progress_bar(current: int, total: int, *, length: int = PROGRESS_BAR_
     return "█" * filled + "░" * (length - filled)
 
 
-def _message_channel_ids(message: discord.Message) -> set[int]:
+def message_channel_ids(message: discord.Message) -> set[int]:
     """The channel's own ID, plus its thread parent's ID if it's a thread."""
     channel = message.channel
     ids = {channel.id}
@@ -70,7 +70,7 @@ def is_xp_eligible(message: discord.Message, config: GuildConfigSchema) -> bool:
         return False
     if not config.leveling_enabled:
         return False
-    if _message_channel_ids(message) & set(config.no_xp_channel_ids):
+    if message_channel_ids(message) & set(config.no_xp_channel_ids):
         return False
     author_role_ids = {role.id for role in getattr(message.author, "roles", [])}
     return not author_role_ids & set(config.no_xp_role_ids)
@@ -103,6 +103,26 @@ def voice_xp_earners(guild: discord.Guild, config: GuildConfigSchema) -> dict[in
             if not {role.id for role in member.roles} & no_xp_roles:
                 earners[member.id] = channel
     return earners
+
+
+def voice_present_members(guild: discord.Guild) -> dict[int, VoiceChannel]:
+    """Members present under the server-stats rule this minute, each with the channel they're in.
+
+    A channel counts when at least ``MIN_VOICE_COMPANY`` non-bot members are in it, deafened or not, and it isn't the
+    AFK channel. Unlike :func:`voice_xp_earners`, no-XP channels/roles and ``leveling_enabled`` don't apply: this is
+    presence for server stats, not voice XP eligibility.
+    """
+    afk_id = guild.afk_channel.id if guild.afk_channel is not None else None
+    present: dict[int, VoiceChannel] = {}
+    for channel in (*guild.voice_channels, *guild.stage_channels):
+        if channel.id == afk_id:
+            continue
+        members = [member for member in channel.members if not member.bot]
+        if len(members) < MIN_VOICE_COMPANY:
+            continue
+        for member in members:
+            present[member.id] = channel
+    return present
 
 
 def merge_grants(grants: Iterable[XPGrantResult]) -> dict[int, XPAwardResult]:
@@ -173,12 +193,15 @@ class LevelingCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def grant_voice_xp(self, guild: discord.Guild) -> None:
-        """Give this minute's voice XP and announce any level-ups in the level-up channel or the voice chat."""
+        """Give this minute's voice XP, report presence for stats, and announce any level-ups."""
         config = await self.bot.configs.get(guild.id)
         earners = voice_xp_earners(guild, config)
-        if not earners:
+        present = voice_present_members(guild)
+        if not present:
             return
-        grants = await self.bot.api.grant_voice_xp(guild.id, VoiceXPRequest(user_ids=sorted(earners)))
+        grants = await self.bot.api.grant_voice_xp(
+            guild.id, VoiceXPRequest(user_ids=sorted(earners), present_user_ids=sorted(present))
+        )
         for user_id, result in merge_grants(grants).items():
             member = guild.get_member(user_id)
             if result.leveled_up and member is not None:

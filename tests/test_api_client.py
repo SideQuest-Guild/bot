@@ -19,6 +19,8 @@ from sidequest_common.schemas import (
     GuildRoleIn,
     MemberLink,
     MemberProfileIn,
+    MessageBackfill,
+    MessageBackfillBucket,
     ModCaseCreate,
     SignupNoticeAck,
 )
@@ -262,6 +264,30 @@ async def test_put_member_profiles_puts_profiles_and_departed_ids(api: SideQuest
         ],
         "departed_ids": [2],
     }
+
+
+ACTIVITY_MESSAGES_URL = f"{BASE}/api/guilds/1/activity/messages"
+
+
+@respx.mock
+async def test_backfill_messages_puts_buckets_and_parses_result(api: SideQuestAPI) -> None:
+    route = respx.put(ACTIVITY_MESSAGES_URL).mock(return_value=httpx.Response(200, json={"buckets": 2}))
+    buckets = [
+        MessageBackfillBucket(user_id=1, hour_start="2026-01-01T12:00:00+00:00", messages=5),
+        MessageBackfillBucket(user_id=2, hour_start="2026-01-01T13:00:00+00:00", messages=3),
+    ]
+
+    result = await api.backfill_messages(1, MessageBackfill(buckets=buckets))
+
+    assert route.call_count == 1
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {
+        "buckets": [
+            {"user_id": 1, "hour_start": "2026-01-01T12:00:00Z", "messages": 5},
+            {"user_id": 2, "hour_start": "2026-01-01T13:00:00Z", "messages": 3},
+        ]
+    }
+    assert result.buckets == 2
 
 
 SIGNUP_NOTICES_URL = f"{BASE}/api/guilds/1/signup-notices"

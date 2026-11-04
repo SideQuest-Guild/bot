@@ -277,6 +277,36 @@ class TestVoiceXPEarners:
         assert leveling_module.voice_xp_earners(_voice_guild(pair), _make_config(leveling_enabled=False)) == {}
 
 
+class TestVoicePresentMembers:
+    def test_afk_channel_excluded(self) -> None:
+        afk = _voice_channel(60, [_voice_member(1), _voice_member(2)])
+        assert leveling_module.voice_present_members(_voice_guild(afk, afk=afk)) == {}
+
+    def test_lone_member_excluded(self) -> None:
+        alone = _voice_channel(61, [_voice_member(1)])
+        assert leveling_module.voice_present_members(_voice_guild(alone)) == {}
+
+    def test_deafened_members_still_counted(self) -> None:
+        pair = _voice_channel(62, [_voice_member(1, deaf=True), _voice_member(2, deaf=True)])
+
+        present = leveling_module.voice_present_members(_voice_guild(pair))
+
+        assert sorted(present) == [1, 2]
+        assert present[1] is pair
+
+    def test_bots_dont_count_toward_company(self) -> None:
+        channel = _voice_channel(63, [_voice_member(1), _voice_member(2, bot=True)])
+        assert leveling_module.voice_present_members(_voice_guild(channel)) == {}
+
+    def test_no_xp_channels_and_roles_still_count(self) -> None:
+        """Unlike voice XP, presence for stats ignores no-XP channels/roles entirely."""
+        channel = _voice_channel(64, [_voice_member(1, role_ids=(500,)), _voice_member(2)], category_id=99)
+
+        present = leveling_module.voice_present_members(_voice_guild(channel))
+
+        assert sorted(present) == [1, 2]
+
+
 def _grant(user_id: int, *, source: str, amount: int, xp: int, level: int, previous_level: int, **roles: list[int]):
     return XPGrantResult(
         awarded=True,
@@ -328,6 +358,32 @@ async def test_a_minute_in_voice_earns_xp_and_announces_level_ups_in_the_voice_c
     assert (await api.get_rank(guild.id, near.id)).level == 1
     channel.send.assert_awaited_once()
     assert channel.send.await_args.args[0] == "GG <@41>, level 1!"
+
+
+async def test_voice_tick_sends_present_ids_with_no_earners_when_leveling_disabled(api: SideQuestAPI) -> None:
+    pair = _voice_channel(43, [_voice_member(70), _voice_member(71)])
+    guild = _voice_guild(pair)
+    cog = _cog_with(api, _make_config(guild_id=guild.id, leveling_enabled=False))
+    grant_mock = AsyncMock(return_value=[])
+
+    with patch.object(api, "grant_voice_xp", grant_mock):
+        await cog.grant_voice_xp(guild)
+
+    grant_mock.assert_awaited_once()
+    request = grant_mock.await_args.args[1]
+    assert request.user_ids == []
+    assert sorted(request.present_user_ids) == [70, 71]
+
+
+async def test_voice_tick_does_nothing_with_nobody_present(api: SideQuestAPI) -> None:
+    guild = _voice_guild()
+    cog = _cog_with(api, _make_config(guild_id=guild.id))
+    grant_mock = AsyncMock(return_value=[])
+
+    with patch.object(api, "grant_voice_xp", grant_mock):
+        await cog.grant_voice_xp(guild)
+
+    grant_mock.assert_not_called()
 
 
 async def test_activity_sync_pays_out_and_announces_in_the_system_channel(api: SideQuestAPI) -> None:

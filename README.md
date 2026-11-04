@@ -29,6 +29,11 @@ lives there.
   announced in the voice channel's chat; from events and groups, in the server's system channel. A level-up
   channel set with `/levels` overrides both. Level roles from *Lv 5 · Wayfarer* to *Lv 50 · Legend* come on their
   own. No-XP channels and roles apply to everything.
+- **Server stats.** The bot keeps hourly counts of messages and time spent in voice with someone else outside the
+  AFK channel, for every member, whether or not leveling itself is on. Officers see guild-wide stats and
+  leaderboards on the website; every member sees their own chat, voice, event and group activity on their Hall of
+  Heroes profile. `/stats backfill` reads past message counts from channel history once, so counts don't start at
+  zero.
 - **Badges.** Earn one on the [Hall of Heroes](https://sidequest-guild.com/heroes/) and the bot gives you its role
   and says so in chat.
 - **Away on a Quest.** Mark away dates on the website and you hold this role for those days.
@@ -72,6 +77,7 @@ Server Settings, Integrations. Settings are saved in the API and apply at once.
 | `/welcome ...` | Manage Server | The welcome message in `#general` and the role new members get. `/welcome test` shows it. |
 | `/logging channel`, `/logging status` | Manage Server | Where edits, deletes, joins, leaves, role changes and voice moves are logged. |
 | `/levels ...` | Manage Server | Level rewards, chat XP range, cooldown, level-up messages, and channels or roles that earn no XP (chat, voice, events or groups). |
+| `/stats backfill [days]` | Manage Server | Reads past message counts from channel history into server stats (default the last year). Safe to re-run. |
 | `/rolemenu ...` | Manage Roles | Button panels that let members pick their own roles. |
 | `/warn`, `/timeout`, `/untimeout` | Timeout Members | Each one DMs the member, opens a numbered case and logs it. |
 | `/kick` | Kick Members | As above. |

@@ -24,11 +24,17 @@ async def test_zachs_general_voice_chat_and_friends_role(run: Run) -> None:
     # Any name will do ("Friends", "Spectator", "Hangout"); what matters is one new role that can join the channel.
     friends = out.created_roles
     assert len(friends) == 1, f"expected one new role, got {[r.name for r in friends]}"
-    voices = [c for c in out.created_channels if isinstance(c, discord.VoiceChannel)]
-    assert len(voices) == 1, f"expected one new voice channel, got {[c.name for c in out.created_channels]}"
-    assert lets_in(out, voices[0], friends[0].name), "friends can't join the new voice channel"
-    assert lets_in(out, voices[0], "New Arrival"), "guild members can't join the new voice channel"
-    assert not lets_in(out, voices[0], "At the Gate"), "people who haven't signed in can join it"
+    # A new channel or The Tavern (already the members' voice channel) both answer Zach, as long as the new role and
+    # members share a voice channel guests can't join.
+    shared = [
+        channel
+        for channel in out.guild.channels
+        if isinstance(channel, discord.VoiceChannel)
+        and lets_in(out, channel, friends[0].name)
+        and lets_in(out, channel, "New Arrival")
+    ]
+    assert shared, "the new role and guild members share no voice channel"
+    assert all(not lets_in(out, channel, "At the Gate") for channel in shared), "guests can join it too"
     assert plan_kinds(out) <= {"create_role", "create_channel", "allow_role"}, "the plan does more than was asked"
 
 

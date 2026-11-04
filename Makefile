@@ -31,7 +31,7 @@ upgrade: ## Upgrade dependencies (including the sidequest-common/sidequest-api g
 
 ##@ Code Quality
 
-.PHONY: fmt fmt-check lint type-check type-baseline test coverage check-all ci
+.PHONY: fmt fmt-check lint type-check type-baseline test coverage evals check-all ci
 fmt: ## Format and autofix (ruff)
 	@$(UV) run --no-sync ruff format .
 	@$(UV) run --no-sync ruff check --fix .
@@ -53,6 +53,9 @@ test: ## Run the test suite
 
 coverage: ## Run the test suite with a coverage report
 	@PYTHONDONTWRITEBYTECODE=1 $(UV) run --no-sync pytest -q --cov=sidequest_bot --cov-report=term-missing --cov-report=xml
+
+evals: ## Run the AI helper evals against a real model (needs AI_API_KEY; EVAL_MODELS=a,b compares models)
+	@PYTHONDONTWRITEBYTECODE=1 $(UV) run --no-sync pytest evals -q --force-enable-socket -p no:cacheprovider
 
 check-all: fmt-check lint type-check test ## Run every check CI runs
 

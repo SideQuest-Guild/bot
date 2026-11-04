@@ -114,3 +114,4 @@ runtime-evaluated-base-classes = [
 "tests/**" = [
     "ANN", "ARG", "D", "DTZ", "EM", "FBT", "INP", "PLC", "PLR", "PLR2004", "PT011", "S", "SLF", "TC", "TRY",
 ]
+"evals/**" = ["D", "INP", "PLR2004", "S101", "SLF001", "TC"]

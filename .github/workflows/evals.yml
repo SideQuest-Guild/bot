@@ -1,0 +1,88 @@
+name: Evals
+
+# Runs the AI helper evals (evals/) against real models through OpenRouter. They cost money, so they run only when
+# the helper, its harness or this workflow changes, once a week to catch a model changing under us, and by hand to
+# compare models. Pull requests from forks have no key and skip.
+
+on:
+  pull_request:
+    paths:
+      - "src/sidequest_bot/plugins/assistant.py"
+      - "src/sidequest_bot/lib/llm.py"
+      - "src/sidequest_bot/lib/roles.py"
+      - "evals/**"
+      - "tests/fakes.py"
+      - ".github/workflows/evals.yml"
+  schedule:
+    - cron: "17 9 * * 1" # Mondays 09:17 UTC
+  workflow_dispatch:
+    inputs:
+      models:
+        description: "Comma-separated OpenRouter models to compare"
+        default: "anthropic/claude-haiku-5.5,openai/gpt-6-luna"
+      trials:
+        description: "Runs per case per model"
+        default: "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evals-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: 1
+  FORCE_COLOR: 1
+
+jobs:
+  evals:
+    name: AI helper evals
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check for the OpenRouter key
+        id: key
+        env:
+          AI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [[ -z "${AI_API_KEY}" ]]; then
+            echo "No OPENROUTER_API_KEY secret here (a fork, or not set up yet), so the evals are skipped." >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.key.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+
+      - name: Install uv (Python from .python-version)
+        if: steps.key.outputs.ready == 'true'
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+
+      - name: Sync project
+        if: steps.key.outputs.ready == 'true'
+        run: uv sync --locked
+
+      - name: Run evals
+        if: steps.key.outputs.ready == 'true'
+        env:
+          AI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Pull requests check the bot's model; the weekly run compares both candidates; a manual run takes any list.
+          EVAL_MODELS: ${{ inputs.models || (github.event_name == 'schedule' && 'anthropic/claude-haiku-5.5,openai/gpt-6-luna') || 'anthropic/claude-haiku-5.5' }}
+          EVAL_TRIALS: ${{ inputs.trials || '3' }}
+          EVAL_RESULTS: eval-results.json
+        run: make evals
+
+      - name: Keep the results
+        if: always() && steps.key.outputs.ready == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eval-results
+          path: eval-results.json
+          if-no-files-found: ignore
+          retention-days: 30

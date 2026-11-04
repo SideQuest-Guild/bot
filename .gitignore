@@ -10,3 +10,4 @@ htmlcov/
 dist/
 *.db
 .DS_Store
+eval-results.json

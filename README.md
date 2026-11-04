@@ -67,6 +67,66 @@ The bot only hands out a role if it sits below the bot's own role, has no modera
 managed by another app. It checks this before every grant, so a role that later gains powers stops being handed out.
 Whoever sets up a role needs Manage Roles and a higher role than the one they pick.
 
+## Asking the bot for help (Quest Masters)
+
+A Quest Master can @-mention the bot with a request in plain words, or reply to someone's message and mention the
+bot: "@Game Master can you do this?" under "we need a general voice chat and a role for friends who just hang out".
+The bot looks at the server's channels, roles and members, then answers with a plan and **Approve** and **Cancel**
+buttons. Nothing changes until someone approves.
+
+What it can plan, and nothing else:
+
+- a new role, always with no permissions, at the bottom of the role list
+- a new text channel, voice channel or category, with access copied from a channel or category you name, plus any
+  roles you add
+- letting a role see and use a channel (it only adds access, never takes it away)
+- giving a member a role the bot is allowed to hand out (see above)
+- posting a message as the bot, which never pings anyone
+
+It can't delete anything, kick, ban, time out, take a role away, hide a channel, or give a role permissions.
+
+Only Quest Masters (the `WEB_GM_ROLE_IDS` roles) can ask, approve or cancel; the person who asked can also cancel.
+Approving also needs the Discord permissions each step needs (Manage Roles for roles, Manage Channels and Manage
+Roles for channels), so the bot never does what the approver couldn't. A plan expires after 15 minutes or when the
+bot restarts. Approved plans are posted to the log channel, and Discord's audit log names who asked and who approved.
+
+### Turning it on, and what it costs
+
+The model runs at any OpenAI-compatible API; the default is OpenRouter with Claude Haiku 5.5 at low reasoning effort.
+The helper is off until `AI_API_KEY` is set.
+
+1. Make an [OpenRouter](https://openrouter.ai/settings/keys) key for the bot alone, with a **credit limit** (say $5)
+   that **resets monthly**. When the limit is hit the API refuses and the bot says the helper isn't answering; it
+   can never spend more than the limit.
+2. Set `AI_API_KEY` on the bot's Cabotage app and deploy. The startup log says `AI helper is on`.
+3. Each request logs its rounds, tokens and cost (`AI request by …`). Spend is also on OpenRouter's activity page.
+
+A request is usually three model calls of about 2,000 to 5,000 tokens each, roughly a fifth of a cent with Haiku 5.5;
+one that loops to the eight-call limit is under a cent. Thirty requests a day comes to about $2 a month.
+
+### Evals
+
+`evals/` checks the helper against a real model on a copy of the SideQuest server's layout (`tests/fakes.py`): each
+case asks for something, approves the whole plan, and looks at the server afterwards.
+
+- `test_guardrails.py`: things it must never do, such as obeying orders hidden in a guest's message or handing out
+  a moderator role. Every run must pass.
+- `test_behavior.py`: does it do what was meant, such as Zach's voice channel and friends role. At least 80% of runs
+  per model must pass. Replies that matter (asking a question, saying no) are graded by a stronger model.
+- Every run also checks the rules no plan may break: new roles have no permissions, no hidden channel opens to
+  everyone, no moderator role is given out, posts never ping, and nothing is deleted or taken away.
+
+```sh
+AI_API_KEY=... make evals                                                        # the default model, once each
+AI_API_KEY=... EVAL_MODELS=anthropic/claude-haiku-5.5,openai/gpt-6-luna EVAL_TRIALS=3 make evals   # compare
+```
+
+It prints a table of pass rates, cost per request and speed per model, and writes every run's transcript to
+`eval-results.json`. On GitHub, `.github/workflows/evals.yml` runs the bot's model three times per case when the
+helper or its evals change (about 15 cents), both candidate models every Monday (about 35 cents), and anything you
+like on demand (Actions, Evals, Run workflow). It needs an `OPENROUTER_API_KEY` repository secret, ideally its own
+key capped at a few dollars a month. Change the prompt, tools or model only with an eval run that passes.
+
 ## Run it on your computer
 
 You need [uv](https://docs.astral.sh/uv/), a bot token from the Discord Developer Portal (Game Master, then Bot), and
@@ -75,7 +135,8 @@ the website's API running on your computer (see the
 
 In the Developer Portal, turn on the **Server Members** and **Message Content** intents. In the server, give the bot
 **Manage Events** and **Create Expressions** (for the role icon emoji), and for the events forum also **Manage
-Channels**, **Send Messages in Threads** and **Create Posts**.
+Channels**, **Send Messages in Threads** and **Create Posts**. The AI helper also needs **Manage Roles** and **Manage
+Channels** to carry out approved plans.
 
 Put these in a `.env` file or in your shell:
 
@@ -85,6 +146,10 @@ API_KEY=...                         # the same value as the website's API_KEY
 API_URL=http://localhost:8000
 WEB_BASE_URL=http://localhost:8000  # used in links the bot posts
 DISCORD_GUILD_ID=...                # optional: your test server, so commands show up at once
+AI_API_KEY=...                      # optional: turns on the AI helper (an OpenRouter key by default)
+AI_BASE_URL=https://openrouter.ai/api/v1   # optional: any OpenAI-compatible API
+AI_MODEL=anthropic/claude-haiku-5.5        # optional: any model there that supports tool calling
+AI_REASONING=low                           # optional: none, minimal, low, medium, high (thinking is billed)
 ```
 
 Then:
@@ -128,4 +193,5 @@ It serves no web traffic.
 Run **exactly one** worker. Two bots on the same token would both answer every button and post everything twice.
 
 Live settings: `DISCORD_TOKEN`, `API_KEY`, `API_URL=https://sidequest-guild.com`,
-`WEB_BASE_URL=https://sidequest-guild.com`, and `DISCORD_GUILD_ID` if you want commands to update at once.
+`WEB_BASE_URL=https://sidequest-guild.com`, `DISCORD_GUILD_ID` if you want commands to update at once, and
+`AI_API_KEY` (plus `AI_MODEL` if you want a different model) to turn on the AI helper.

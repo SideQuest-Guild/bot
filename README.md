@@ -28,6 +28,13 @@ lives there.
 - **WoW: Forever news.** Every five minutes the bot checks Blizzard's own forum posts about WoW: Forever and
   Wowhead's WoW: Forever news, and posts each new one in the feed channel with a link to the full post.
 - **Class halls.** Pick a class in `#choose-your-class` and you join that class's post in `#class-halls`.
+- **Group voice.** `#lfg` has one button per kind (Dungeon, Raid, World Boss, Leveling, PvP, Hangout). Click one and
+  a voice channel opens right away, with a Join link and an **Add details** button to name it, add a note, flag
+  needed roles, invite members, and ping the kind's opt-in role. A live card in `#lfg` shows who's in it. The
+  owner gets Rename, Set cap, Lock/Unlock, Transfer and End buttons in the channel's own chat; if the owner leaves,
+  the longest-present member takes over. A channel that stays empty for two minutes, or that nobody joins, goes away;
+  its chat is kept for officers for 30 days. Every event thread and weekly-board card has an **Open voice** button that
+  opens a group voice channel for that event, or links the one already open.
 - **Server emoji.** Every role icon is also a server emoji named after it: `:warrior:`, `:mage:` and the other
   classes, the ranks such as `:quest_master:`, `:at_the_gate:`, and every badge such as `:first_steps:`. The bot adds
   any that are missing when it starts. It never changes or deletes an emoji, and leaves a name alone if the server
@@ -43,6 +50,7 @@ Server Settings, Integrations. Settings are saved in the API and apply at once.
 | Command | Needs | What it does |
 |---|---|---|
 | `/eventsync forum [channel]` | Manage Server | Picks the forum for event threads. |
+| `/lfg channel <channel>`, `/lfg pingrole <kind> [role]`, `/lfg status` | Manage Server | Picks the `#lfg` panel channel, sets a kind's opt-in ping role, or shows live groups. |
 | `/weeklyboard channel`, `/weeklyboard preview` | Manage Server | Picks the weekly board's channel, or shows you this week's board. |
 | `/badges channel`, `/badges sync` | Manage Server | Picks where badges are announced, or checks for new badges now. |
 | `/announcements channel` | Manage Server | Picks where announcements from the game and the website are posted. |
@@ -135,8 +143,10 @@ the website's API running on your computer (see the
 
 In the Developer Portal, turn on the **Server Members** and **Message Content** intents. In the server, give the bot
 **Manage Events** and **Create Expressions** (for the role icon emoji), and for the events forum also **Manage
-Channels**, **Send Messages in Threads** and **Create Posts**. The AI helper also needs **Manage Roles** and **Manage
-Channels** to carry out approved plans.
+Channels**, **Send Messages in Threads** and **Create Posts**. Group voice needs **Manage Channels** (create and
+delete voice channels, rename them, change their user limit), **Manage Roles** (lock/unlock overwrites) and **Read
+Message History** (transcripts); it also needs **Mention Everyone** if a kind's opt-in ping role isn't itself
+mentionable. The AI helper also needs **Manage Roles** and **Manage Channels** to carry out approved plans.
 
 Put these in a `.env` file or in your shell:
 

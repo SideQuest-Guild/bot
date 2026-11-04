@@ -2,6 +2,104 @@
   "errors": [
     {
       "column": 15,
+      "path": "src/sidequest_bot/plugins/event_sync.py",
+      "name": "bad-override",
+      "concise_description": "Class member `SignupDetailsModal.on_submit` overrides parent class `Modal` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/event_sync.py",
+      "name": "bad-override",
+      "concise_description": "Class member `EventSignupButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/event_sync.py",
+      "name": "bad-override",
+      "concise_description": "Class member `ChangeSignupDetailsButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `SpawnButton.from_custom_id` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `SpawnButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `OwnerControlButton.from_custom_id` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `OwnerControlButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `OpenVoiceButton.from_custom_id` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `OpenVoiceButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `_DetailsButton.callback` overrides parent class `Button` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `AddDetailsModal.on_submit` overrides parent class `Modal` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `RenameModal.on_submit` overrides parent class `Modal` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `CapModal.on_submit` overrides parent class `Modal` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `TransferModal.on_submit` overrides parent class `Modal` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
       "path": "src/sidequest_bot/plugins/guest_welcome.py",
       "name": "bad-override",
       "concise_description": "Class member `GuestWelcomeButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
@@ -26,27 +124,6 @@
       "path": "src/sidequest_bot/plugins/signup_notices.py",
       "name": "bad-override",
       "concise_description": "Class member `SignupApproveButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
-      "severity": "error"
-    },
-    {
-      "column": 15,
-      "path": "src/sidequest_bot/plugins/event_sync.py",
-      "name": "bad-override",
-      "concise_description": "Class member `SignupDetailsModal.on_submit` overrides parent class `Modal` in an inconsistent manner",
-      "severity": "error"
-    },
-    {
-      "column": 15,
-      "path": "src/sidequest_bot/plugins/event_sync.py",
-      "name": "bad-override",
-      "concise_description": "Class member `EventSignupButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
-      "severity": "error"
-    },
-    {
-      "column": 15,
-      "path": "src/sidequest_bot/plugins/event_sync.py",
-      "name": "bad-override",
-      "concise_description": "Class member `ChangeSignupDetailsButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
       "severity": "error"
     }
   ]

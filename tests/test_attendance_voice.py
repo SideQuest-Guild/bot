@@ -8,7 +8,12 @@ from uuid import uuid4
 import discord
 
 from sidequest_bot.api_client import APIError, NotFoundError
-from sidequest_bot.plugins.attendance_voice import AttendanceVoiceCog, running_events, voice_member_ids
+from sidequest_bot.plugins.attendance_voice import (
+    AttendanceVoiceCog,
+    present_member_ids,
+    running_events,
+    voice_member_ids,
+)
 from sidequest_common.schemas import EventKind, EventStatus, EventSummary, VoicePresenceEntry, VoicePresenceReport
 
 
@@ -59,7 +64,7 @@ def _fake_guild(*, guild_id: int = 42, voice_channels: list[MagicMock] | None = 
 
 def _make_cog(*, api: object, guilds: list[object] | None = None) -> AttendanceVoiceCog:
     cog = AttendanceVoiceCog.__new__(AttendanceVoiceCog)
-    cog.bot = SimpleNamespace(api=api, guilds=guilds or [])
+    cog.bot = SimpleNamespace(api=api, guilds=guilds or [], get_cog=lambda _name: None)
     cog._minutes = {}
     if isinstance(api, AsyncMock):
         api.get_voice_presence.side_effect = lambda _guild_id, event_id: VoicePresenceReport(
@@ -114,6 +119,23 @@ class TestVoiceMemberIds:
 
     def test_empty_guild_has_no_voice_members(self) -> None:
         assert voice_member_ids(_fake_guild()) == set()
+
+
+class TestPresentMemberIds:
+    def test_with_no_linked_channel_counts_every_voice_channel(self) -> None:
+        guild = _fake_guild(voice_channels=[_fake_voice_channel(members=[_fake_member(member_id=1)])])
+        assert present_member_ids(guild, only_channel_id=None) == {1}
+
+    def test_with_a_linked_channel_counts_only_that_channel(self) -> None:
+        linked = _fake_voice_channel(members=[_fake_member(member_id=1), _fake_member(member_id=2, bot=True)])
+        guild = _fake_guild(voice_channels=[_fake_voice_channel(members=[_fake_member(member_id=3)])])
+        guild.get_channel.return_value = linked
+        assert present_member_ids(guild, only_channel_id=999) == {1}
+
+    def test_linked_channel_gone_counts_nobody(self) -> None:
+        guild = _fake_guild()
+        guild.get_channel.return_value = None
+        assert present_member_ids(guild, only_channel_id=999) == set()
 
 
 class TestTickGuild:

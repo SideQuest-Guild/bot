@@ -22,6 +22,12 @@ from sidequest_common.schemas import (
     DiscordPushAck,
     DiscordSyncPending,
     EventSummary,
+    GroupPresenceReport,
+    GroupSessionClose,
+    GroupSessionCreate,
+    GroupSessionSchema,
+    GroupSessionUpdate,
+    GroupTranscriptPurge,
     GuildConfigSchema,
     GuildConfigUpdate,
     GuildRoleIn,
@@ -77,6 +83,7 @@ _EVENTS = TypeAdapter(list[EventSummary])
 _MEMBER_LINKS = TypeAdapter(list[MemberLink])
 _ROLE_RESETS = TypeAdapter(list[RoleResetCandidate])
 _WEEKLY_BOARD_EVENTS = TypeAdapter(list[WeeklyBoardEvent])
+_GROUP_SESSIONS = TypeAdapter(list[GroupSessionSchema])
 
 
 class APIError(Exception):
@@ -393,6 +400,16 @@ class SideQuestAPI:
         data = await self._request("GET", "/api/events", params={"when": "upcoming"})
         return _parse(_EVENTS.validate_python, data)
 
+    async def get_event(self, event_id: UUID) -> EventSummary:
+        """One event's headline fields (kind, title, ...), via the public ``/api/events/{id}`` GET.
+
+        Raises ``NotFoundError`` if ``event_id`` is unknown. The response is actually ``EventDetail`` (a superset
+        of ``EventSummary``, e.g. with the roster); validating as ``EventSummary`` keeps callers that only need the
+        headline fields decoupled from that extra shape.
+        """
+        data = await self._request("GET", f"/api/events/{event_id}")
+        return _parse(EventSummary.model_validate, data)
+
     async def get_recruiting(self) -> Recruiting:
         """What roles and classes the guild is recruiting for (the public ``/api/recruiting`` GET)."""
         data = await self._request("GET", "/api/recruiting")
@@ -511,3 +528,40 @@ class SideQuestAPI:
             f"{self._guild(guild_id)}/announcements/{announcement_id}/posted",
             body=AnnouncementPosted(message_id=message_id),
         )
+
+    # --- Group voice (LFG)
+
+    async def create_group(self, guild_id: int, create: GroupSessionCreate) -> GroupSessionSchema:
+        """Record a group channel the bot just created. Raises ``APIError`` (409) if the channel already has one."""
+        data = await self._request("POST", f"{self._guild(guild_id)}/groups", body=create)
+        return _parse(GroupSessionSchema.model_validate, data)
+
+    async def list_open_groups(self, guild_id: int) -> list[GroupSessionSchema]:
+        """Every group session with no ``ended_at`` yet, oldest first, so a restarted bot can resume counters."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/groups/open")
+        return _parse(_GROUP_SESSIONS.validate_python, data)
+
+    async def get_group(self, guild_id: int, session_id: UUID) -> GroupSessionSchema:
+        """One group session. Raises ``NotFoundError`` if unknown."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/groups/{session_id}")
+        return _parse(GroupSessionSchema.model_validate, data)
+
+    async def update_group(self, guild_id: int, session_id: UUID, changes: GroupSessionUpdate) -> GroupSessionSchema:
+        """Apply only the fields set on ``changes``; ``channel_name=None`` is ignored, never clears it."""
+        data = await self._request(
+            "PATCH", f"{self._guild(guild_id)}/groups/{session_id}", body=changes, exclude_unset=True
+        )
+        return _parse(GroupSessionSchema.model_validate, data)
+
+    async def report_group_presence(self, guild_id: int, session_id: UUID, report: GroupPresenceReport) -> None:
+        """Push cumulative per-member and per-pair minutes so far; the API keeps ``max(stored, reported)``."""
+        await self._request("PUT", f"{self._guild(guild_id)}/groups/{session_id}/presence", body=report)
+
+    async def close_group(self, guild_id: int, session_id: UUID, close: GroupSessionClose) -> None:
+        """End a group session with final presence and transcript. Idempotent: closing twice merges presence only."""
+        await self._request("POST", f"{self._guild(guild_id)}/groups/{session_id}/close", body=close)
+
+    async def purge_group_transcripts(self, guild_id: int) -> GroupTranscriptPurge:
+        """Delete transcripts of sessions ended more than the retention window ago. Called once a day."""
+        data = await self._request("POST", f"{self._guild(guild_id)}/groups/purge")
+        return _parse(GroupTranscriptPurge.model_validate, data)

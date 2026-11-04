@@ -38,6 +38,7 @@ from sidequest_bot.plugins.event_sync import (
     parse_change_custom_id,
     parse_signup_custom_id,
 )
+from sidequest_bot.plugins.group_finder import OpenVoiceButton
 from sidequest_common.schemas import (
     BoardSignup,
     DiscordEventPush,
@@ -903,12 +904,15 @@ class TestChangeCustomId:
 
 
 class TestBuildSignupView:
-    def test_has_three_persistent_buttons(self) -> None:
+    def test_has_three_signup_buttons_and_an_open_voice_button(self) -> None:
         view = build_signup_view(uuid4())
         assert view.timeout is None
-        assert len(view.children) == 3
-        labels = {button.item.label for button in view.children}
-        assert labels == {"Going", "Maybe", "Can't"}
+        assert len(view.children) == 4
+        signup_labels = {button.item.label for button in view.children if isinstance(button, EventSignupButton)}
+        assert signup_labels == {"Going", "Maybe", "Can't"}
+        open_voice = [button for button in view.children if isinstance(button, OpenVoiceButton)]
+        assert len(open_voice) == 1
+        assert open_voice[0].item.label == "Open voice"
 
 
 class TestGuessClassFromRoles:

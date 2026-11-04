@@ -33,6 +33,7 @@ from discord.ext import commands, tasks
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.embeds import Colors
+from sidequest_bot.plugins.group_finder import OpenVoiceButton
 from sidequest_common.schemas import (
     EVENT_KIND_LABELS,
     ROLE_KINDS,
@@ -266,10 +267,11 @@ def parse_change_custom_id(custom_id: str) -> tuple[UUID, SignupStatus] | None:
 
 
 def build_signup_view(event_id: UUID) -> discord.ui.View:
-    """A persistent view with the Going/Maybe/Can't buttons for one event's forum starter post."""
+    """A persistent view with the Going/Maybe/Can't buttons, and an "Open voice" button, for one event's forum post."""
     view = discord.ui.View(timeout=None)
     for status in (SignupStatus.SIGNED, SignupStatus.TENTATIVE, SignupStatus.ABSENT):
         view.add_item(EventSignupButton(event_id, status))
+    view.add_item(OpenVoiceButton(event_id))
     return view
 
 
@@ -374,6 +376,7 @@ def build_event_card(
     if state == "open":
         for status in (SignupStatus.SIGNED, SignupStatus.TENTATIVE, SignupStatus.ABSENT):
             view.add_item(EventSignupButton(event_id, status))
+        view.add_item(OpenVoiceButton(event_id))
     view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label="More info", url=detail_url))
     if thread_url is not None:
         view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label="Thread", url=thread_url))

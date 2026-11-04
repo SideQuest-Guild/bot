@@ -156,13 +156,22 @@ class TestBuildBadgeEmbed:
 
 
 class TestBadgeIcons:
-    def test_every_badge_ships_a_png_icon(self) -> None:
+    PENDING_ICON_BADGE_IDS = frozenset({"party_animal", "party_leader"})
+    """Badges with no role icon artwork yet; ``badge_icon``/``create_badge_role`` already fall back to no icon."""
+
+    def test_every_other_badge_ships_a_png_icon(self) -> None:
         """Each badge's role icon must be packaged with the bot, or recreated roles come back without one."""
         for badge in BADGE_LIST:
+            if badge.id in self.PENDING_ICON_BADGE_IDS:
+                continue
             icon = badge_icon(badge.id)
             assert icon is not None, badge.id
             assert icon.startswith(b"\x89PNG"), badge.id
             assert len(icon) < 256 * 1024, badge.id  # Discord's role icon limit
+
+    def test_pending_icon_badges_fall_back_to_no_icon(self) -> None:
+        for badge_id in self.PENDING_ICON_BADGE_IDS:
+            assert badge_icon(badge_id) is None
 
     async def test_new_role_gets_its_icon_when_the_guild_has_role_icons(self) -> None:
         guild = _fake_guild()

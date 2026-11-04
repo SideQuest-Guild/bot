@@ -1,13 +1,15 @@
 """Tracks who's in the guild's voice channels while an event runs, and pushes cumulative minutes per member.
 
 Every ``TRACK_INTERVAL_SECONDS``: for each guild event currently running (started, not past its window end, not
-cancelled), add one minute to every non-bot member currently in one of the guild's voice/stage channels, then push
-that event's cumulative minutes so far. The first tick tracking a given event resumes from the API's currently
-stored totals (``get_voice_presence``) rather than starting its local counter at 0, and the API keeps
-``max(existing, reported)`` per member (see ``VoicePresenceReport``), so a missed tick, a bot restart, or a
-duplicate push never double-counts and never lowers an already-accumulated total. The attendance screen shows
-this next to each sign-up and pre-ticks "Came" at or above the threshold
-(``sidequest_api.lib.attendance.VOICE_PRESENT_THRESHOLD_MINUTES``).
+cancelled), add one minute to every non-bot member currently present, then push that event's cumulative minutes so
+far. Presence is every voice/stage channel in the guild, unless the event has a live group voice channel linked to
+it (opened via the LFG panel's "Open voice" button, see ``group_finder.py``), in which case only that one channel
+counts while it stays live; an event without a linked group keeps counting every voice channel, unchanged. The
+first tick tracking a given event resumes from the API's currently stored totals (``get_voice_presence``) rather
+than starting its local counter at 0, and the API keeps ``max(existing, reported)`` per member (see
+``VoicePresenceReport``), so a missed tick, a bot restart, or a duplicate push never double-counts and never lowers
+an already-accumulated total. The attendance screen shows this next to each sign-up and pre-ticks "Came" at or
+above the threshold (``sidequest_api.lib.attendance.VOICE_PRESENT_THRESHOLD_MINUTES``).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from discord.ext import commands, tasks
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
+from sidequest_bot.plugins.group_finder import GroupFinderCog
 from sidequest_common.schemas import EventStatus, VoicePresenceEntry, VoicePresenceReport
 
 if TYPE_CHECKING:
@@ -60,6 +63,17 @@ def voice_member_ids(guild: discord.Guild) -> set[int]:
         for member in channel.members
         if not member.bot
     }
+
+
+def present_member_ids(guild: discord.Guild, *, only_channel_id: int | None) -> set[int]:
+    """Present non-bot members: everyone in ``guild``'s voice channels, or just one channel if linked to a group."""
+    if only_channel_id is None:
+        return voice_member_ids(guild)
+    channel = guild.get_channel(only_channel_id)
+    members = getattr(channel, "members", None)
+    if members is None:
+        return set()
+    return {member.id for member in members if not member.bot}
 
 
 class AttendanceVoiceCog(commands.Cog):
@@ -109,8 +123,8 @@ class AttendanceVoiceCog(commands.Cog):
             return
         now = datetime.now(UTC)
         active = running_events(events, now=now)
-        present = voice_member_ids(guild) if active else set()
         for event in active:
+            present = present_member_ids(guild, only_channel_id=self._linked_channel_id(event.id))
             if event.id not in self._minutes:
                 self._minutes[event.id] = await self._resume_totals(guild, event.id)
             totals = self._minutes[event.id]
@@ -120,6 +134,13 @@ class AttendanceVoiceCog(commands.Cog):
         known_ids = {event.id for event in events}
         for event_id in [tracked_id for tracked_id in self._minutes if tracked_id not in known_ids]:
             del self._minutes[event_id]
+
+    def _linked_channel_id(self, event_id: UUID) -> int | None:
+        """The voice channel of a live group linked to ``event_id``, if the LFG cog has one, else ``None``."""
+        finder = self.bot.get_cog("GroupFinderCog")
+        if not isinstance(finder, GroupFinderCog):
+            return None
+        return finder.linked_channel_id(event_id)
 
     async def _push(self, guild: discord.Guild, event_id: UUID, totals: dict[int, int]) -> None:
         if not totals:

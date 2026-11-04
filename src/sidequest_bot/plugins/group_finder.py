@@ -24,13 +24,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Self
+from importlib.resources import files
+from typing import TYPE_CHECKING, Any, Self, cast
 from uuid import UUID
 
 import discord
@@ -39,7 +41,7 @@ from discord.ext import commands, tasks
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
-from sidequest_bot.lib.embeds import Colors, make_embed
+from sidequest_bot.lib.embeds import Colors
 from sidequest_common.schemas import (
     EMPTY_GRACE_SECONDS,
     GROUP_KIND_DEFAULT_CAP,
@@ -89,7 +91,43 @@ MIN_GROUPED_MEMBERS = 2
 MINUTES_PER_HOUR = 60
 
 NEED_LABELS: dict[SignupRole, str] = {SignupRole.TANK: "Tank", SignupRole.HEALER: "Healer", SignupRole.DPS: "DPS"}
-_NEED_OPTIONS = [discord.CheckboxGroupOption(label=label, value=role.value) for role, label in NEED_LABELS.items()]
+NEED_EMOJI: dict[SignupRole, str] = {SignupRole.TANK: "🛡️", SignupRole.HEALER: "💚", SignupRole.DPS: "🗡️"}
+_NEED_OPTIONS = [
+    discord.CheckboxGroupOption(label=f"{NEED_EMOJI[role]} {label}", value=role.value)
+    for role, label in NEED_LABELS.items()
+]
+
+KIND_EMOJI: dict[EventKind, str] = {
+    EventKind.DUNGEON: "🗝️",
+    EventKind.RAID: "🐉",
+    EventKind.WORLD_BOSS: "👹",
+    EventKind.LEVELING: "🧭",
+    EventKind.PVP: "⚔️",
+    EventKind.SOCIAL: "🍻",
+}
+KIND_BLURBS: dict[EventKind, str] = {
+    EventKind.DUNGEON: "Runs, carries and attunements",
+    EventKind.RAID: "Raid nights and pugs; set a 10 or 20 cap after",
+    EventKind.WORLD_BOSS: "Rally on a world boss or world event",
+    EventKind.LEVELING: "Questing and grinding together",
+    EventKind.PVP: "Battlegrounds and world PvP",
+    EventKind.SOCIAL: "Hang out in voice, no plan needed",
+}
+KIND_COLORS: dict[EventKind, discord.Colour] = {
+    EventKind.DUNGEON: discord.Colour(0x4A9DF2),
+    EventKind.RAID: discord.Colour(0xB673F5),
+    EventKind.WORLD_BOSS: discord.Colour(0xFF8C2A),
+    EventKind.LEVELING: discord.Colour(0x5FD38D),
+    EventKind.PVP: discord.Colour(0xE0533D),
+    EventKind.SOCIAL: Colors.SITE_GOLD,
+}
+"""Card accent per kind, after WoW's item-quality colors so a glance tells the kinds apart."""
+
+BANNER_FILENAME = "lfg-banner.jpg"
+MAX_CARD_MEMBERS_SHOWN = 10
+MAX_CAP_PIPS = 10
+"""Groups capped at this many or fewer get a filled/empty slot bar on their card."""
+_BANNER = files("sidequest_bot") / "assets" / "lfg" / "banner.jpg"
 
 _UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _SPAWN_CUSTOM_ID_RE = re.compile(r"^sq:lfg:spawn:(?P<kind>[a-z_]+)$")
@@ -216,25 +254,62 @@ def rename_cooldown_minutes(rename_times: Sequence[datetime], now: datetime) -> 
     return max(1, math.ceil(remaining / 60))
 
 
-def build_card_text(
+def cap_pips(member_count: int, cap: int | None) -> str:
+    """A filled/empty slot bar such as ``▰▰▰▱▱`` for small capped groups; ``""`` when uncapped or over the pip limit."""
+    if cap is None or cap > MAX_CAP_PIPS:
+        return ""
+    filled = min(member_count, cap)
+    return "▰" * filled + "▱" * (cap - filled)
+
+
+@dataclass(frozen=True)
+class CardContent:
+    """A live LFG card's text: ``header`` sits beside the Join button, ``details`` below it, ``footer`` last."""
+
+    header: str
+    details: str
+    footer: str
+    full: bool
+
+
+def build_card_content(
     *,
+    kind: EventKind,
     display_name: str,
-    member_count: int,
+    member_ids: Sequence[int],
     cap: int | None,
     needs: Sequence[SignupRole],
     note: str | None,
-    owner_mention: str,
-    join_url: str,
-) -> str:
-    """The live LFG card line, e.g. ``dungeon-deadmines · 3/5 · needs Healer · note · <@owner> · [Join](...)``."""
-    count_text = f"{member_count}/{cap}" if cap else str(member_count)
-    parts = [f"**{display_name}**", count_text]
+    owner_id: int,
+    locked: bool,
+    started_at: datetime,
+) -> CardContent:
+    """The live card for one group: who's in it against its cap, what it needs, its note, and who leads it."""
+    count = len(member_ids)
+    if count == 0:
+        status = "Waiting for the first player"
+    elif cap:
+        status = f"**{count}/{cap}** in voice"
+    else:
+        status = f"**{count}** in voice"
+    pips = cap_pips(count, cap)
+    header_lines = [f"### {KIND_EMOJI[kind]} {display_name}", f"{status}{f'  {pips}' if pips else ''}"]
+    detail_lines = [f"👑 Led by <@{owner_id}>" + (" · 🔒 Invite only" if locked else "")]
     if needs:
-        parts.append("needs " + "/".join(NEED_LABELS[role] for role in needs))
+        detail_lines.append("**Needs** " + " · ".join(f"{NEED_EMOJI[role]} {NEED_LABELS[role]}" for role in needs))
     if note:
-        parts.append(note)
-    parts.append(owner_mention)
-    return " · ".join(parts) + f" · [Join]({join_url})"
+        detail_lines.append(f"> {note}")
+    if member_ids:
+        shown = " ".join(f"<@{member_id}>" for member_id in member_ids[:MAX_CARD_MEMBERS_SHOWN])
+        hidden = count - MAX_CARD_MEMBERS_SHOWN
+        detail_lines.append(f"**In voice** {shown}" + (f" +{hidden} more" if hidden > 0 else ""))
+    footer = f"-# {GROUP_KIND_LABELS[kind]} · started {discord.utils.format_dt(started_at, style='R')}"
+    return CardContent(
+        header="\n".join(header_lines),
+        details="\n".join(detail_lines),
+        footer=footer,
+        full=cap is not None and count >= cap,
+    )
 
 
 def format_duration(minutes: int) -> str:
@@ -315,7 +390,8 @@ class LiveGroup:
     locked: bool = False
     rename_times: list[datetime] = field(default_factory=list)
     last_push_at: datetime | None = None
-    last_card_text: str | None = None
+    last_card: CardContent | None = None
+    """The card last drawn, so an unchanged card isn't edited again."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     @property
@@ -327,33 +403,100 @@ class LiveGroup:
 # --- Spawn panel ----------------------------------------------------------------------------------------------
 
 
-def build_panel_embed() -> discord.Embed:
-    """The ``#lfg`` panel embed."""
-    return make_embed(
-        title="Find a group",
-        description="Pick a kind below to start a voice channel right away.",
-        color=Colors.SITE_GOLD,
-        timestamp=False,
+def _cap_text(kind: EventKind) -> str:
+    cap = GROUP_KIND_DEFAULT_CAP[kind]
+    return f"{cap} players" if cap else "No cap"
+
+
+def banner_file() -> discord.File:
+    """The panel's banner painting (adventurers mustering at the gate), attached to the panel message."""
+    return discord.File(io.BytesIO(_BANNER.read_bytes()), filename=BANNER_FILENAME, description="Adventurers mustering")
+
+
+def build_panel_layout() -> discord.ui.LayoutView:
+    """The ``#lfg`` panel: banner, a one-line pitch, one row per kind with its Start button, and how it works."""
+    container = discord.ui.Container(accent_colour=Colors.SITE_GOLD)
+    container.add_item(
+        discord.ui.MediaGallery(
+            discord.MediaGalleryItem(f"attachment://{BANNER_FILENAME}", description="Adventurers mustering at the gate")
+        )
     )
-
-
-def build_panel_view() -> discord.ui.View:
-    """A persistent view with one spawn button per :data:`GROUP_KINDS`."""
-    view = discord.ui.View(timeout=None)
+    container.add_item(
+        discord.ui.TextDisplay(
+            "## Looking for Group\n"
+            "Start a voice channel in one click and it's yours. Name it, flag the roles you need and ping friends "
+            "after, or just jump in."
+        )
+    )
+    container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
     for kind in GROUP_KINDS:
-        view.add_item(SpawnButton(kind))
+        container.add_item(
+            discord.ui.Section(
+                f"**{KIND_EMOJI[kind]} {GROUP_KIND_LABELS[kind]}**\n-# {_cap_text(kind)} · {KIND_BLURBS[kind]}",
+                accessory=_in_layout(SpawnButton(kind)),
+            )
+        )
+    container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
+    container.add_item(
+        discord.ui.TextDisplay(
+            "-# You get a **Join** link and an **Add details** button. The owner can rename, set a cap, lock, hand off "
+            "or end the group from its chat. Empty channels close after 2 minutes; group chat is kept 30 days for "
+            "officers."
+        )
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
     return view
 
 
-def build_owner_controls_view(session_id: UUID, *, locked: bool) -> discord.ui.View:
-    """The owner-controls buttons posted once in a group channel's text chat."""
-    view = discord.ui.View(timeout=None)
-    view.add_item(OwnerControlButton(session_id, "rename"))
-    view.add_item(OwnerControlButton(session_id, "cap"))
-    view.add_item(OwnerControlButton(session_id, "locktoggle", label="Unlock" if locked else "Lock"))
-    view.add_item(OwnerControlButton(session_id, "transfer"))
-    view.add_item(OwnerControlButton(session_id, "end"))
+def build_card_layout(content: CardContent, *, kind: EventKind, join_url: str) -> discord.ui.LayoutView:
+    """One live group's card in ``#lfg``: kind-colored, with a Join button beside its name (greyed out when full)."""
+    join = discord.ui.Button(
+        style=discord.ButtonStyle.link, label="Full" if content.full else "Join", url=join_url, disabled=content.full
+    )
+    container = discord.ui.Container(accent_colour=KIND_COLORS[kind])
+    container.add_item(discord.ui.Section(content.header, accessory=join))
+    container.add_item(discord.ui.TextDisplay(content.details))
+    container.add_item(discord.ui.TextDisplay(content.footer))
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
     return view
+
+
+def build_owner_controls_layout(session_id: UUID, *, kind: EventKind, locked: bool) -> discord.ui.LayoutView:
+    """The owner controls posted once in a group channel's text chat."""
+    container = discord.ui.Container(accent_colour=KIND_COLORS[kind])
+    container.add_item(
+        discord.ui.TextDisplay(
+            "### 👑 Group controls\n"
+            "For the group's owner and officers. If the owner leaves, whoever has been here longest takes over."
+        )
+    )
+    container.add_item(
+        discord.ui.ActionRow(
+            *(
+                _in_layout(OwnerControlButton(session_id, action, locked=locked))
+                for action in ("rename", "cap", "locktoggle", "transfer", "end")
+            )
+        )
+    )
+    container.add_item(
+        discord.ui.TextDisplay(
+            "-# This channel closes 2 minutes after it empties. Chat here is kept 30 days for officers."
+        )
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
+
+
+def _in_layout(item: discord.ui.DynamicItem[Any]) -> discord.ui.Item[discord.ui.LayoutView]:
+    """``item`` typed for a layout's ``Section`` or ``ActionRow``.
+
+    discord.py declares every ``DynamicItem`` as ``Item[View | LayoutView]``, which the layout-only containers reject
+    even though dispatch works the same in both kinds of view.
+    """
+    return cast("discord.ui.Item[discord.ui.LayoutView]", item)
 
 
 class SpawnButton(discord.ui.DynamicItem[discord.ui.Button], template=_SPAWN_CUSTOM_ID_RE):
@@ -363,7 +506,8 @@ class SpawnButton(discord.ui.DynamicItem[discord.ui.Button], template=_SPAWN_CUS
         super().__init__(
             discord.ui.Button(
                 style=discord.ButtonStyle.primary,
-                label=GROUP_KIND_LABELS[kind],
+                label="Start",
+                emoji=KIND_EMOJI[kind],
                 custom_id=f"sq:lfg:spawn:{kind.value}",
             )
         )
@@ -386,20 +530,24 @@ class SpawnButton(discord.ui.DynamicItem[discord.ui.Button], template=_SPAWN_CUS
 class OwnerControlButton(discord.ui.DynamicItem[discord.ui.Button], template=_OWNER_CUSTOM_ID_RE):
     """One owner-control button; state (the action and session) lives entirely in its ``custom_id``."""
 
-    _LABELS: dict[str, str] = {
-        "rename": "Rename",
-        "cap": "Set cap",
-        "locktoggle": "Lock",
-        "transfer": "Transfer",
-        "end": "End",
+    _LABELS: dict[str, tuple[str, str]] = {
+        "rename": ("Rename", "✏️"),
+        "cap": ("Set cap", "👥"),
+        "transfer": ("Transfer", "👑"),
+        "end": ("End", "⏹️"),
     }
     _STYLES: dict[str, discord.ButtonStyle] = {"end": discord.ButtonStyle.danger}
 
-    def __init__(self, session_id: UUID, action: str, *, label: str | None = None) -> None:
+    def __init__(self, session_id: UUID, action: str, *, locked: bool = False) -> None:
+        if action == "locktoggle":
+            label, emoji = ("Unlock", "🔓") if locked else ("Lock", "🔒")
+        else:
+            label, emoji = self._LABELS[action]
         super().__init__(
             discord.ui.Button(
                 style=self._STYLES.get(action, discord.ButtonStyle.secondary),
-                label=label or self._LABELS[action],
+                label=label,
+                emoji=emoji,
                 custom_id=f"sq:lfg:owner:{action}:{session_id}",
             )
         )
@@ -712,24 +860,29 @@ class GroupFinderCog(commands.Cog):
     # --- Panel -----------------------------------------------------------------------------------------------
 
     async def _ensure_panel(self, guild: discord.Guild, channel: discord.TextChannel) -> None:
+        """Draw the panel over the saved message, or post a fresh one (also replacing a pre-layout embed panel)."""
         config = await self.bot.configs.get(guild.id)
-        embed = build_panel_embed()
-        view = build_panel_view()
         if config.lfg_panel_message_id is not None:
             try:
-                await channel.get_partial_message(config.lfg_panel_message_id).edit(embed=embed, view=view)
+                existing = await channel.fetch_message(config.lfg_panel_message_id)
+                if existing.flags.components_v2:
+                    await existing.edit(view=build_panel_layout(), attachments=[banner_file()])
+                    return
+                await existing.delete()  # an embed panel can't be edited into a layout; replace it
             except discord.NotFound:
                 pass
             except discord.HTTPException:
-                logger.warning("Failed to edit the LFG panel in guild %s", guild.id, exc_info=True)
-                return
-            else:
+                logger.warning("Failed to redraw the LFG panel in guild %s", guild.id, exc_info=True)
                 return
         try:
-            message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+            message = await channel.send(
+                view=build_panel_layout(), file=banner_file(), allowed_mentions=discord.AllowedMentions.none()
+            )
         except discord.HTTPException:
             logger.warning("Failed to post the LFG panel in guild %s", guild.id, exc_info=True)
             return
+        with contextlib.suppress(discord.HTTPException):
+            await message.pin(reason="LFG panel")
         await self.bot.configs.update(guild.id, GuildConfigUpdate(lfg_panel_message_id=message.id))
 
     # --- Spawning ----------------------------------------------------------------------------------------------
@@ -919,13 +1072,17 @@ class GroupFinderCog(commands.Cog):
         view = discord.ui.View(timeout=180)
         view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label="Join", url=join_url))
         view.add_item(_DetailsButton(self, session.id, kind))
-        await interaction.followup.send(f"Started {channel.mention}.", view=view, ephemeral=True)
+        await interaction.followup.send(
+            f"{KIND_EMOJI[kind]} {channel.mention} is yours. Hop in, or **Add details** first: a name, a note, the "
+            "roles you need, and who to ping. All optional.",
+            view=view,
+            ephemeral=True,
+        )
 
     async def _post_owner_controls(self, channel: discord.VoiceChannel, live: LiveGroup) -> None:
         try:
             await channel.send(
-                "**Group controls**",
-                view=build_owner_controls_view(live.session_id, locked=live.locked),
+                view=build_owner_controls_layout(live.session_id, kind=live.kind, locked=live.locked),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
@@ -1060,7 +1217,10 @@ class GroupFinderCog(commands.Cog):
                 live.locked = True
         if interaction.message is not None:
             with contextlib.suppress(discord.HTTPException):
-                await interaction.message.edit(view=build_owner_controls_view(live.session_id, locked=live.locked))
+                await interaction.message.edit(
+                    view=build_owner_controls_layout(live.session_id, kind=live.kind, locked=live.locked)
+                )
+        await self._refresh_card(guild, live)
         await interaction.followup.send("Locked." if live.locked else "Unlocked.", ephemeral=True)
 
     async def rename_group(
@@ -1170,39 +1330,49 @@ class GroupFinderCog(commands.Cog):
             return
         voice_channel = guild.get_channel(live.channel_id)
         present = (
-            len([m for m in voice_channel.members if not m.bot])
+            [m.id for m in voice_channel.members if not m.bot]
             if isinstance(voice_channel, discord.VoiceChannel)
-            else 0
+            else []
         )
-        join_url = f"https://discord.com/channels/{guild.id}/{live.channel_id}"
-        text = build_card_text(
+        far_future = datetime.max.replace(tzinfo=UTC)
+        present.sort(key=lambda member_id: live.join_order.get(member_id, far_future))
+        content = build_card_content(
+            kind=live.kind,
             display_name=live.display_name,
-            member_count=present,
+            member_ids=present,
             cap=live.cap,
             needs=live.needs,
             note=live.note,
-            owner_mention=f"<@{live.owner_id}>",
-            join_url=join_url,
+            owner_id=live.owner_id,
+            locked=live.locked,
+            started_at=live.started_at,
         )
-        if text == live.last_card_text:
+        if content == live.last_card:
             return
-        live.last_card_text = text
-        if live.card_message_id is None:
+        live.last_card = content
+        layout = build_card_layout(
+            content, kind=live.kind, join_url=f"https://discord.com/channels/{guild.id}/{live.channel_id}"
+        )
+        if live.card_message_id is not None:
+            message = channel.get_partial_message(live.card_message_id)
             try:
-                message = await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+                await message.edit(view=layout)
+            except discord.NotFound:
+                pass
             except discord.HTTPException:
-                logger.warning("Failed to post the LFG card for group %s", live.session_id, exc_info=True)
+                # e.g. a plain-text card from before cards became layouts: replace it
+                with contextlib.suppress(discord.HTTPException):
+                    await message.delete()
+            else:
                 return
-            live.card_message_id = message.id
-            await self._push_update(guild, live)
-            return
         try:
-            await channel.get_partial_message(live.card_message_id).edit(content=text)
-        except discord.NotFound:
-            live.card_message_id = None
-            await self._refresh_card(guild, live)
+            posted = await channel.send(view=layout, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
-            logger.warning("Failed to update the LFG card for group %s", live.session_id, exc_info=True)
+            logger.warning("Failed to post the LFG card for group %s", live.session_id, exc_info=True)
+            live.last_card = None
+            return
+        live.card_message_id = posted.id
+        await self._push_update(guild, live)
 
     async def _delete_card_message(self, guild: discord.Guild, card_message_id: int | None) -> None:
         if card_message_id is None:

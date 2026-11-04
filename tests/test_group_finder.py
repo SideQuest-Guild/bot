@@ -6,9 +6,12 @@ from uuid import uuid4
 import pytest
 
 from sidequest_bot.plugins.group_finder import (
+    CardContent,
+    SpawnButton,
     allocate_group_number,
-    build_card_text,
+    build_card_content,
     build_open_voice_custom_id,
+    build_panel_layout,
     build_recap_line,
     extract_taken_numbers,
     format_duration,
@@ -21,7 +24,7 @@ from sidequest_bot.plugins.group_finder import (
     slugify,
     tick_presence,
 )
-from sidequest_common.schemas import EventKind, SignupRole
+from sidequest_common.schemas import GROUP_KINDS, EventKind, SignupRole
 
 
 class TestAllocateGroupNumber:
@@ -177,58 +180,64 @@ class TestRenameCooldownMinutes:
         assert rename_cooldown_minutes(old, now) == 0
 
 
-class TestBuildCardText:
-    def test_shows_count_against_cap(self) -> None:
-        text = build_card_text(
-            display_name="dungeon-deadmines",
-            member_count=3,
-            cap=5,
-            needs=[],
-            note=None,
-            owner_mention="<@1>",
-            join_url="https://discord.com/x",
-        )
-        assert "3/5" in text
-        assert "dungeon-deadmines" in text
+def _card(**overrides: object) -> CardContent:
+    facts: dict[str, object] = {
+        "kind": EventKind.DUNGEON,
+        "display_name": "dungeon-deadmines",
+        "member_ids": [11, 22, 33],
+        "cap": 5,
+        "needs": [],
+        "note": None,
+        "owner_id": 11,
+        "locked": False,
+        "started_at": datetime(2026, 11, 4, 20, 0, tzinfo=UTC),
+    }
+    return build_card_content(**{**facts, **overrides})  # type: ignore[arg-type]
 
-    def test_shows_count_alone_without_a_cap(self) -> None:
-        text = build_card_text(
-            display_name="raid-1", member_count=10, cap=None, needs=[], note=None, owner_mention="<@1>", join_url="u"
-        )
-        assert "10" in text
-        assert "/" not in text.split("·")[1]
 
-    def test_includes_needed_roles(self) -> None:
-        text = build_card_text(
-            display_name="raid-1",
-            member_count=1,
-            cap=None,
-            needs=[SignupRole.HEALER, SignupRole.TANK],
-            note=None,
-            owner_mention="<@1>",
-            join_url="u",
-        )
-        assert "needs" in text
-        assert "Healer" in text
-        assert "Tank" in text
+class TestBuildCardContent:
+    def test_counts_players_against_the_cap_with_a_slot_bar(self) -> None:
+        card = _card()
+        assert "**3/5** in voice" in card.header
+        assert "▰▰▰▱▱" in card.header
+        assert not card.full
 
-    def test_includes_note_when_set(self) -> None:
-        text = build_card_text(
-            display_name="raid-1",
-            member_count=1,
-            cap=None,
-            needs=[],
-            note="clearing fast",
-            owner_mention="<@1>",
-            join_url="u",
-        )
-        assert "clearing fast" in text
+    def test_an_uncapped_group_shows_only_the_count(self) -> None:
+        card = _card(kind=EventKind.SOCIAL, cap=None)
+        assert "**3** in voice" in card.header
+        assert "▰" not in card.header
 
-    def test_ends_with_a_join_link(self) -> None:
-        text = build_card_text(
-            display_name="raid-1", member_count=1, cap=None, needs=[], note=None, owner_mention="<@1>", join_url="u"
-        )
-        assert text.endswith("[Join](u)")
+    def test_a_big_raid_gets_no_slot_bar(self) -> None:
+        assert "▰" not in _card(kind=EventKind.RAID, cap=40).header
+
+    def test_a_group_nobody_has_joined_says_so(self) -> None:
+        assert "Waiting for the first player" in _card(member_ids=[]).header
+
+    def test_a_group_at_its_cap_is_full(self) -> None:
+        assert _card(member_ids=[1, 2, 3, 4, 5]).full
+
+    def test_details_name_the_owner_needs_note_and_lock(self) -> None:
+        card = _card(needs=[SignupRole.TANK, SignupRole.HEALER], note="need key holder", locked=True)
+        assert "<@11>" in card.details
+        assert "Tank" in card.details
+        assert "Healer" in card.details
+        assert "> need key holder" in card.details
+        assert "Invite only" in card.details
+
+    def test_lists_at_most_ten_members_then_a_count(self) -> None:
+        card = _card(kind=EventKind.RAID, cap=40, owner_id=1, member_ids=list(range(1, 15)))
+        assert "<@10>" in card.details
+        assert "<@11>" not in card.details
+        assert "+4 more" in card.details
+
+
+class TestBuildPanelLayout:
+    def test_offers_every_group_kind(self) -> None:
+        layout = build_panel_layout()
+        custom_ids = {
+            getattr(item, "custom_id", None) for item in layout.walk_children() if isinstance(item, SpawnButton)
+        }
+        assert custom_ids == {f"sq:lfg:spawn:{kind.value}" for kind in GROUP_KINDS}
 
 
 class TestFormatDuration:

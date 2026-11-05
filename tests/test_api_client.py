@@ -7,7 +7,13 @@ import respx
 from tenacity import wait_none
 
 from sidequest_bot import api_client
-from sidequest_bot.api_client import APIError, APIResponseShapeError, APIUnavailableError, NotFoundError, SideQuestAPI
+from sidequest_bot.api_client import (
+    APIError,
+    APIResponseShapeError,
+    APIUnavailableError,
+    NotFoundError,
+    SideQuestAPI,
+)
 from sidequest_common.schemas import (
     CaseAction,
     ConfirmByDiscordRequest,
@@ -362,3 +368,109 @@ async def test_confirm_roster_from_notice_puts_actor(api: SideQuestAPI) -> None:
     assert listing.roster_confirmed is True
     sent = json.loads(route.calls.last.request.content)
     assert sent == {"actor_discord_id": "200", "actor_name": "GM"}
+
+
+ITEMS_URL = f"{BASE}/api/items"
+_ITEM_JSON = {
+    "item_id": 19019,
+    "name": "Thunderfury, Blessed Blade of the Windseeker",
+    "quality": "LEGENDARY",
+    "quality_name": "Legendary",
+    "item_class": "Weapon",
+    "item_subclass": "Sword",
+    "inventory_type": "ONEHWEAPON",
+    "inventory_type_name": "One-Hand",
+    "item_level": 80,
+    "required_level": 60,
+    "sell_price": 50000,
+    "is_equippable": True,
+    "icon_url": "https://render.worldofwarcraft.com/icons/56/inv_sword_39.jpg",
+    "tooltip": ["Binds when picked up", "Unique", "One-Hand Sword"],
+}
+
+
+@respx.mock
+async def test_search_items_sends_query_and_parses_page(api: SideQuestAPI) -> None:
+    route = respx.get(ITEMS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "page": 1,
+                "page_count": 1,
+                "results": [
+                    {
+                        "item_id": 19019,
+                        "name": "Thunderfury, Blessed Blade of the Windseeker",
+                        "quality": "LEGENDARY",
+                        "quality_name": "Legendary",
+                        "inventory_type": "ONEHWEAPON",
+                        "inventory_type_name": "One-Hand",
+                        "item_level": 80,
+                        "required_level": 60,
+                    }
+                ],
+            },
+        )
+    )
+    page = await api.search_items("thunderfury")
+    assert route.call_count == 1
+    assert dict(route.calls.last.request.url.params) == {"q": "thunderfury", "page": "1"}
+    assert page.page_count == 1
+    assert page.results == [
+        api_client.ItemSummary(
+            item_id=19019,
+            name="Thunderfury, Blessed Blade of the Windseeker",
+            quality="LEGENDARY",
+            quality_name="Legendary",
+            inventory_type="ONEHWEAPON",
+            inventory_type_name="One-Hand",
+            item_level=80,
+            required_level=60,
+        )
+    ]
+
+
+@respx.mock
+async def test_search_items_sends_quality_and_slot_filters(api: SideQuestAPI) -> None:
+    route = respx.get(ITEMS_URL).mock(
+        return_value=httpx.Response(200, json={"page": 1, "page_count": 0, "results": []})
+    )
+    await api.search_items("bless", page=2, qualities=("EPIC", "LEGENDARY"), slot="TWOHWEAPON")
+    sent_params = route.calls.last.request.url.params
+    assert sent_params.get_list("quality") == ["EPIC", "LEGENDARY"]
+    assert sent_params["q"] == "bless"
+    assert sent_params["page"] == "2"
+    assert sent_params["slot"] == "TWOHWEAPON"
+
+
+@respx.mock
+async def test_search_items_raises_api_error_on_503(api: SideQuestAPI) -> None:
+    respx.get(ITEMS_URL).mock(return_value=httpx.Response(503, json={"detail": "Battle.net unavailable"}))
+    with pytest.raises(APIError) as excinfo:
+        await api.search_items("bless")
+    assert excinfo.value.status_code == 503
+
+
+@respx.mock
+async def test_get_item_parses_tooltip(api: SideQuestAPI) -> None:
+    route = respx.get(f"{ITEMS_URL}/19019").mock(return_value=httpx.Response(200, json=_ITEM_JSON))
+    item = await api.get_item(19019)
+    assert route.call_count == 1
+    assert item.name == "Thunderfury, Blessed Blade of the Windseeker"
+    assert item.tooltip == ["Binds when picked up", "Unique", "One-Hand Sword"]
+    assert item.sell_price == 50000
+
+
+@respx.mock
+async def test_get_item_raises_not_found_for_unknown_item(api: SideQuestAPI) -> None:
+    respx.get(f"{ITEMS_URL}/999999").mock(return_value=httpx.Response(404, json={"detail": "not found"}))
+    with pytest.raises(NotFoundError):
+        await api.get_item(999999)
+
+
+@respx.mock
+async def test_get_item_raises_api_error_when_battlenet_unavailable(api: SideQuestAPI) -> None:
+    respx.get(f"{ITEMS_URL}/19019").mock(return_value=httpx.Response(503, json={"detail": "Battle.net unavailable"}))
+    with pytest.raises(APIError) as excinfo:
+        await api.get_item(19019)
+    assert excinfo.value.status_code == 503

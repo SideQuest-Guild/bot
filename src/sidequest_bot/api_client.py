@@ -5,7 +5,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Self
 
 import httpx
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_after_attempt, wait_exponential
 
 from sidequest_common.schemas import (
@@ -70,12 +70,10 @@ from sidequest_common.schemas import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from datetime import datetime
     from types import TracebackType
     from uuid import UUID
-
-    from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +88,49 @@ _ROLE_RESETS = TypeAdapter(list[RoleResetCandidate])
 _WEEKLY_BOARD_EVENTS = TypeAdapter(list[WeeklyBoardEvent])
 _GROUP_SESSIONS = TypeAdapter(list[GroupSessionSchema])
 _XP_GRANTS = TypeAdapter(list[XPGrantResult])
+
+
+class ItemSummary(BaseModel):
+    """One item in a search result (``GET /api/items``); no icon or tooltip.
+
+    Mirrors the website's ``ItemSearchResult`` by hand: the item schemas aren't in the ``sidequest-common`` pin yet.
+    """
+
+    item_id: int
+    name: str
+    quality: str = Field(description="Battle.net's quality constant, such as `EPIC`.")
+    quality_name: str = Field(description="The quality as the game shows it, such as `Epic`.")
+    inventory_type: str = Field(description="Battle.net's slot constant, such as `TWOHWEAPON`.")
+    inventory_type_name: str = Field(description="The slot as the game shows it, such as `Two-Hand`.")
+    item_level: int
+    required_level: int
+
+
+class ItemSearchPage(BaseModel):
+    """One page of item search results (``GET /api/items``). Mirrors the website's ``ItemSearchPage`` by hand."""
+
+    page: int
+    page_count: int
+    results: list[ItemSummary]
+
+
+class Item(BaseModel):
+    """An item with its tooltip (``GET /api/items/{item_id}``). Mirrors the website's ``ItemSchema`` by hand."""
+
+    item_id: int
+    name: str
+    quality: str = Field(description="Battle.net's quality constant, such as `EPIC`.")
+    quality_name: str = Field(description="The quality as the game shows it, such as `Epic`.")
+    item_class: str
+    item_subclass: str
+    inventory_type: str = Field(description="Battle.net's slot constant, such as `TWOHWEAPON`.")
+    inventory_type_name: str = Field(description="The slot as the game shows it, such as `Two-Hand`.")
+    item_level: int
+    required_level: int
+    sell_price: int = Field(description="What a vendor pays, in copper.")
+    is_equippable: bool
+    icon_url: str | None
+    tooltip: list[str] = Field(description="The tooltip's text lines in order, below the item's name.")
 
 
 class APIError(Exception):
@@ -586,3 +627,30 @@ class SideQuestAPI:
         """Delete transcripts of sessions ended more than the retention window ago. Called once a day."""
         data = await self._request("POST", f"{self._guild(guild_id)}/groups/purge")
         return _parse(GroupTranscriptPurge.model_validate, data)
+
+    # --- Items
+
+    async def search_items(
+        self, query: str, *, page: int = 1, qualities: Sequence[str] = (), slot: str | None = None
+    ) -> ItemSearchPage:
+        """Items with a whole word of ``query`` in their name (the public ``/api/items`` GET).
+
+        Battle.net matches English word stems (``bless`` finds Blessed, ``thund`` finds nothing); search on submit,
+        never as-you-type. 503 if Battle.net isn't configured or didn't answer.
+        """
+        params: dict[str, Any] = {"q": query, "page": page}
+        if qualities:
+            params["quality"] = list(qualities)
+        if slot is not None:
+            params["slot"] = slot
+        data = await self._request("GET", "/api/items", params=params)
+        return _parse(ItemSearchPage.model_validate, data)
+
+    async def get_item(self, item_id: int) -> Item:
+        """One item with its tooltip (the public ``/api/items/{id}`` GET).
+
+        Raises ``NotFoundError`` for an unknown item, or ``APIError`` (status 503) if Battle.net isn't configured
+        or didn't answer.
+        """
+        data = await self._request("GET", f"/api/items/{item_id}")
+        return _parse(Item.model_validate, data)

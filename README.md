@@ -55,7 +55,9 @@ lives there.
   any that are missing when it starts. It never changes or deletes an emoji, and leaves a name alone if the server
   already has an emoji called that. Delete one and it comes back at the next restart; rename it to keep it out of the
   way.
-- **Commands for everyone:** `/rank [member]` shows a level and `/leaderboard` shows the top of the server.
+- **Commands for everyone:** `/rank [member]` shows a level and `/leaderboard` shows the top of the server. `/item
+  <name>` looks up a WoW: Forever item and shows its tooltip, icon and sell price; search a whole word (`bless`,
+  `thunderfury`), not a partial one. Pasting a link to an item's page on the site shows the same tooltip in chat.
 
 ## Commands for officers
 

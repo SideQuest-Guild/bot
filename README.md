@@ -36,6 +36,9 @@ lives there.
   zero.
 - **Badges.** Earn one on the [Hall of Heroes](https://sidequest-guild.com/heroes/) and the bot gives you its role
   and says so in chat.
+- **Character roster.** Every 30 minutes the bot tells the website who's currently in the guild, so character pages,
+  the roster and hero boards at [sidequest-guild.com](https://sidequest-guild.com) stay current with Discord and
+  the in-game addon. It doesn't post anything in Discord.
 - **Away on a Quest.** Mark away dates on the website and you hold this role for those days.
 - **The weekly board.** Every Monday at 10:00 Central the bot posts a card for each of the week's events, with
   Going, Maybe and Can't buttons, **More info** and **Thread** links, and who's going, maybe or can't. The cards keep

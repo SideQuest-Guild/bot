@@ -133,6 +133,20 @@ class Item(BaseModel):
     tooltip: list[str] = Field(description="The tooltip's text lines in order, below the item's name.")
 
 
+class RosterSyncReport(BaseModel):
+    """``POST /api/guilds/{id}/characters/sync``.
+
+    Mirrors the website's ``RosterSyncReport`` by hand: phase 3's character schemas aren't in the
+    ``sidequest-common`` pin yet.
+    """
+
+    members: int
+    joined: list[str]
+    left: list[str]
+    profiles_refreshed: int
+    characters_linked: int
+
+
 class APIError(Exception):
     """The API returned an error response, or couldn't be reached. Every client failure is an APIError."""
 
@@ -575,6 +589,17 @@ class SideQuestAPI:
     async def ack_badge(self, guild_id: int, ack: BadgeAck) -> None:
         """Confirm one member's badge announcement posted, so ``sync_badges`` stops reporting it as pending."""
         await self._request("POST", f"{self._guild(guild_id)}/badges/ack", body=ack)
+
+    # --- Characters (roster sync)
+
+    async def sync_roster(self, guild_id: int) -> RosterSyncReport:
+        """Reconcile the website's character roster with the guild's current Discord/addon data.
+
+        Refreshes up to 8 stale Battle.net profiles per call; safe to call repeatedly. Raises ``NotFoundError`` for
+        a non-site ``guild_id``, or ``APIError`` (status 503) if Battle.net is unconfigured or down.
+        """
+        data = await self._request("POST", f"{self._guild(guild_id)}/characters/sync")
+        return _parse(RosterSyncReport.model_validate, data)
 
     # --- Guild hub announcements
 

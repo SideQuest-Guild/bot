@@ -474,3 +474,38 @@ async def test_get_item_raises_api_error_when_battlenet_unavailable(api: SideQue
     with pytest.raises(APIError) as excinfo:
         await api.get_item(19019)
     assert excinfo.value.status_code == 503
+
+
+ROSTER_SYNC_URL = f"{BASE}/api/guilds/1/characters/sync"
+_ROSTER_SYNC_JSON = {
+    "members": 8,
+    "joined": ["Nox Zul"],
+    "left": [],
+    "profiles_refreshed": 3,
+    "characters_linked": 1,
+}
+
+
+@respx.mock
+async def test_sync_roster_posts_and_parses_report(api: SideQuestAPI) -> None:
+    route = respx.post(ROSTER_SYNC_URL).mock(return_value=httpx.Response(200, json=_ROSTER_SYNC_JSON))
+    report = await api.sync_roster(1)
+    assert route.call_count == 1
+    assert report == api_client.RosterSyncReport(
+        members=8, joined=["Nox Zul"], left=[], profiles_refreshed=3, characters_linked=1
+    )
+
+
+@respx.mock
+async def test_sync_roster_raises_not_found_for_non_site_guild(api: SideQuestAPI) -> None:
+    respx.post(ROSTER_SYNC_URL).mock(return_value=httpx.Response(404, json={"detail": "not found"}))
+    with pytest.raises(NotFoundError):
+        await api.sync_roster(1)
+
+
+@respx.mock
+async def test_sync_roster_raises_api_error_when_battlenet_unavailable(api: SideQuestAPI) -> None:
+    respx.post(ROSTER_SYNC_URL).mock(return_value=httpx.Response(503, json={"detail": "Battle.net unavailable"}))
+    with pytest.raises(APIError) as excinfo:
+        await api.sync_roster(1)
+    assert excinfo.value.status_code == 503

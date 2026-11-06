@@ -38,7 +38,8 @@ lives there.
   and says so in chat.
 - **Character roster.** Every 30 minutes the bot tells the website who's currently in the guild, so character pages,
   the roster and hero boards at [sidequest-guild.com](https://sidequest-guild.com) stay current with Discord and
-  the in-game addon. It doesn't post anything in Discord.
+  the in-game addon. When a roster character first reaches level 40 or 60, it's posted to the announcements
+  channel.
 - **Away on a Quest.** Mark away dates on the website and you hold this role for those days.
 - **The weekly board.** Every Monday at 10:00 Central the bot posts a card for each of the week's events, with
   Going, Maybe and Can't buttons, **More info** and **Thread** links, and who's going, maybe or can't. The cards keep
@@ -61,6 +62,8 @@ lives there.
 - **Commands for everyone:** `/rank [member]` shows a level and `/leaderboard` shows the top of the server. `/item
   <name>` looks up a WoW: Forever item and shows its tooltip, icon and sell price; search a whole word (`bless`,
   `thunderfury`), not a partial one. Pasting a link to an item's page on the site shows the same tooltip in chat.
+  `/who <character>` looks up a roster or previously looked-up character's level, guild, gear and PvP stats from
+  Battle.net, with autocomplete over the roster and past lookups.
 
 ## Commands for officers
 

@@ -1,24 +1,40 @@
-"""Periodic roster sync.
+"""Periodic roster sync and level milestone feed.
 
 Keeps the website's character roster (``/api/guilds/{id}/characters/sync``) current with who's actually in the
-guild, refreshing a handful of stale Battle.net profiles each tick.
+guild, refreshing a handful of stale Battle.net profiles each tick. A changed result is logged at info level so
+the sync is visible in the logs without spamming a channel.
 
-Posts nothing to Discord; a later phase adds a level 40/60 feed. A changed result is logged at info level so the
-sync is visible in the logs without spamming a channel.
+After each sync, posts any level 40/60 milestones the website hasn't sent to Discord yet
+(``/api/guilds/{id}/characters/milestones/pending``) to the guild's announcement channel
+(``GuildConfig.announcement_channel_id``), then acks each one so it isn't posted twice.
 """
 
 import logging
 from http import HTTPStatus
 
-import discord  # noqa: TC002  # discord.py evaluates app-command annotations at runtime
+import discord
 from discord.ext import commands, tasks
 
-from sidequest_bot.api_client import APIError, NotFoundError, RosterSyncReport
+from sidequest_bot.api_client import APIError, CharacterMilestone, NotFoundError, RosterSyncReport
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
+from sidequest_bot.lib.embeds import make_embed
+from sidequest_bot.plugins.characters import CHARACTER_PAGE_URL, class_color
 
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 1800
+
+
+def build_milestone_embed(milestone: CharacterMilestone) -> discord.Embed:
+    """Celebratory, class-colored embed for one level 40/60 milestone, linking to the character page."""
+    embed = make_embed(
+        title=f"{milestone.name} {milestone.surname} reached level {milestone.level}!",
+        color=class_color(milestone.wow_class),
+        timestamp=False,
+    )
+    embed.timestamp = milestone.reached_at
+    embed.url = CHARACTER_PAGE_URL.format(slug=milestone.slug)
+    return embed
 
 
 def describe_sync(report: RosterSyncReport) -> str | None:
@@ -72,6 +88,46 @@ class RosterSyncCog(commands.Cog):
         report = await self.bot.api.sync_roster(guild.id)
         if (summary := describe_sync(report)) is not None:
             logger.info("Roster sync for guild %s: %s", guild.id, summary)
+        await self._post_milestones(guild)
+
+    async def _post_milestones(self, guild: discord.Guild) -> None:
+        try:
+            milestones = await self.bot.api.list_pending_milestones(guild.id)
+        except NotFoundError:
+            logger.info("Milestones endpoint not available yet for guild %s; retrying next tick", guild.id)
+            return
+        except APIError:
+            logger.warning("Fetching pending milestones failed for guild %s", guild.id, exc_info=True)
+            return
+        if not milestones:
+            return
+        config = await self.bot.configs.get(guild.id)
+        if config.announcement_channel_id is None:
+            logger.info(
+                "Guild %s has %d pending level milestone(s) but no announcement channel set",
+                guild.id,
+                len(milestones),
+            )
+            return
+        channel = guild.get_channel(config.announcement_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            logger.info("Guild %s's announcement channel isn't a text channel; milestones left pending", guild.id)
+            return
+        for milestone in milestones:
+            await self._post_milestone(guild, channel, milestone)
+
+    async def _post_milestone(
+        self, guild: discord.Guild, channel: discord.TextChannel, milestone: CharacterMilestone
+    ) -> None:
+        try:
+            message = await channel.send(embed=build_milestone_embed(milestone))
+        except discord.HTTPException:
+            logger.warning("Failed to post milestone %s for guild %s", milestone.id, guild.id, exc_info=True)
+            return
+        try:
+            await self.bot.api.mark_milestone_posted(guild.id, milestone.id, message.id)
+        except APIError:
+            logger.warning("Failed to ack milestone %s for guild %s", milestone.id, guild.id, exc_info=True)
 
 
 async def setup(bot: SideQuestBot) -> None:

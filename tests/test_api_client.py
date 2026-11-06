@@ -1,5 +1,5 @@
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -509,3 +509,142 @@ async def test_sync_roster_raises_api_error_when_battlenet_unavailable(api: Side
     with pytest.raises(APIError) as excinfo:
         await api.sync_roster(1)
     assert excinfo.value.status_code == 503
+
+
+CHARACTERS_URL = f"{BASE}/api/characters/"
+_CHARACTER_SUMMARY_JSON = {
+    "slug": "nox-zul",
+    "name": "Nox",
+    "surname": "Zul",
+    "level": 60,
+    "class": "mage",
+    "race": "Gnome",
+    "faction": "Alliance",
+    "guild_name": "SideQuest",
+    "guild_slug": "sidequest",
+    "in_roster": True,
+    "guild_rank": 0,
+    "rank_name": "Guild Master",
+    "item_level": 70,
+    "spec": "Frost",
+    "achievement_points": 500,
+    "honorable_kills": 10,
+    "pvp_rank": 3,
+    "last_login_at": "2026-01-01T00:00:00+00:00",
+    "profile_found": True,
+    "fetched_at": "2026-01-01T00:00:00+00:00",
+}
+
+
+@respx.mock
+async def test_search_characters_without_query_omits_q(api: SideQuestAPI) -> None:
+    route = respx.get(CHARACTERS_URL).mock(return_value=httpx.Response(200, json=[_CHARACTER_SUMMARY_JSON]))
+    characters = await api.search_characters()
+    assert route.call_count == 1
+    assert "q" not in route.calls.last.request.url.params
+    assert characters[0].slug == "nox-zul"
+    assert characters[0].wow_class == "mage"
+
+
+@respx.mock
+async def test_search_characters_with_query_sends_q(api: SideQuestAPI) -> None:
+    route = respx.get(CHARACTERS_URL).mock(return_value=httpx.Response(200, json=[_CHARACTER_SUMMARY_JSON]))
+    await api.search_characters("nox")
+    assert route.calls.last.request.url.params["q"] == "nox"
+
+
+@respx.mock
+async def test_get_character_parses_page_with_sheet(api: SideQuestAPI) -> None:
+    data = {
+        **_CHARACTER_SUMMARY_JSON,
+        "sheet": {
+            "gear": [
+                {"slot_name": "Head", "name": "Lionheart Helm", "item_level": 65},
+                {"slot_name": "Chest", "name": "Breastplate of Valor", "item_level": 60},
+            ]
+        },
+    }
+    route = respx.get(f"{BASE}/api/characters/nox-zul").mock(return_value=httpx.Response(200, json=data))
+    character = await api.get_character("nox-zul")
+    assert route.call_count == 1
+    assert character.sheet is not None
+    assert len(character.sheet.gear) == 2
+    assert character.sheet.gear[0].name == "Lionheart Helm"
+
+
+@respx.mock
+async def test_get_character_parses_page_without_profile(api: SideQuestAPI) -> None:
+    data = {**_CHARACTER_SUMMARY_JSON, "profile_found": False, "sheet": None}
+    respx.get(f"{BASE}/api/characters/nox-zul").mock(return_value=httpx.Response(200, json=data))
+    character = await api.get_character("nox-zul")
+    assert character.profile_found is False
+    assert character.sheet is None
+
+
+@respx.mock
+async def test_get_character_raises_not_found(api: SideQuestAPI) -> None:
+    respx.get(f"{BASE}/api/characters/zzz-zzz").mock(
+        return_value=httpx.Response(404, json={"detail": "Battle.net has no character zzz-zzz."})
+    )
+    with pytest.raises(NotFoundError) as excinfo:
+        await api.get_character("zzz-zzz")
+    assert excinfo.value.detail == "Battle.net has no character zzz-zzz."
+
+
+@respx.mock
+async def test_get_character_raises_api_error_when_battlenet_unavailable(api: SideQuestAPI) -> None:
+    respx.get(f"{BASE}/api/characters/nox-zul").mock(
+        return_value=httpx.Response(503, json={"detail": "Battle.net unavailable"})
+    )
+    with pytest.raises(APIError) as excinfo:
+        await api.get_character("nox-zul")
+    assert excinfo.value.status_code == 503
+
+
+PENDING_MILESTONES_URL = f"{BASE}/api/guilds/1/characters/milestones/pending"
+_MILESTONE_ID = str(uuid4())
+_MILESTONE_JSON = {
+    "id": _MILESTONE_ID,
+    "slug": "nox-zul",
+    "name": "Nox",
+    "surname": "Zul",
+    "class": "mage",
+    "level": 60,
+    "reached_at": "2026-01-01T00:00:00+00:00",
+    "posted_at": None,
+}
+
+
+@respx.mock
+async def test_list_pending_milestones_parses_list(api: SideQuestAPI) -> None:
+    route = respx.get(PENDING_MILESTONES_URL).mock(return_value=httpx.Response(200, json=[_MILESTONE_JSON]))
+    milestones = await api.list_pending_milestones(1)
+    assert route.call_count == 1
+    assert len(milestones) == 1
+    assert milestones[0].slug == "nox-zul"
+    assert milestones[0].level == 60
+
+
+@respx.mock
+async def test_list_pending_milestones_raises_not_found_for_non_site_guild(api: SideQuestAPI) -> None:
+    respx.get(PENDING_MILESTONES_URL).mock(return_value=httpx.Response(404, json={"detail": "not found"}))
+    with pytest.raises(NotFoundError):
+        await api.list_pending_milestones(1)
+
+
+@respx.mock
+async def test_mark_milestone_posted_sends_message_id(api: SideQuestAPI) -> None:
+    route = respx.post(f"{PENDING_MILESTONES_URL.replace('/pending', '')}/{_MILESTONE_ID}/posted").mock(
+        return_value=httpx.Response(204)
+    )
+    await api.mark_milestone_posted(1, UUID(_MILESTONE_ID), 999)
+    assert route.call_count == 1
+    assert json.loads(route.calls.last.request.content) == {"discord_message_id": 999}
+
+
+@respx.mock
+async def test_mark_milestone_posted_raises_not_found_for_unknown_milestone(api: SideQuestAPI) -> None:
+    url = f"{PENDING_MILESTONES_URL.replace('/pending', '')}/{_MILESTONE_ID}/posted"
+    respx.post(url).mock(return_value=httpx.Response(404, json={"detail": "not found"}))
+    with pytest.raises(NotFoundError):
+        await api.mark_milestone_posted(1, UUID(_MILESTONE_ID), None)

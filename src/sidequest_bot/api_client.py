@@ -1,11 +1,13 @@
 """Typed HTTP client for the SideQuest API. The only way the bot talks to the API."""
 
 import logging
+from datetime import datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Self
+from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_after_attempt, wait_exponential
 
 from sidequest_common.schemas import (
@@ -71,9 +73,7 @@ from sidequest_common.schemas import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from datetime import datetime
     from types import TracebackType
-    from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,94 @@ class RosterSyncReport(BaseModel):
     left: list[str]
     profiles_refreshed: int
     characters_linked: int
+
+
+class CharacterGearItem(BaseModel):
+    """One equipped item, as shown in ``/who``'s gear field.
+
+    Mirrors a subset of the website's ``CharacterGear`` by hand: phase 4's character schemas aren't in the
+    ``sidequest-common`` pin yet.
+    """
+
+    slot_name: str
+    name: str
+    item_level: int | None
+
+
+class CharacterSheet(BaseModel):
+    """The subset of the website's ``CharacterSheet`` this bot shows: just the gear list."""
+
+    gear: list[CharacterGearItem]
+
+
+class CharacterSummary(BaseModel):
+    """A character's Battle.net summary (``GET /api/characters/`` or ``GET /api/characters/?q=``).
+
+    Mirrors the website's ``CharacterSummary`` by hand: phase 4's character schemas aren't in the
+    ``sidequest-common`` pin yet. ``profile_found`` is false while Battle.net has no profile for the character; the
+    summary then holds only what the guild roster says.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    slug: str
+    name: str
+    surname: str
+    level: int
+    wow_class: str | None = Field(default=None, alias="class")
+    race: str | None = None
+    faction: str | None = None
+    guild_name: str | None = None
+    guild_slug: str | None = None
+    in_roster: bool
+    guild_rank: int | None = None
+    rank_name: str | None = None
+    item_level: int | None = None
+    spec: str | None = None
+    achievement_points: int | None = None
+    honorable_kills: int | None = None
+    pvp_rank: int | None = None
+    last_login_at: datetime | None = None
+    profile_found: bool
+    fetched_at: datetime | None = None
+
+
+class CharacterPage(CharacterSummary):
+    """A character's summary plus its sheet (``GET /api/characters/{slug}``).
+
+    ``sheet`` is ``None`` while Battle.net has no profile for the character.
+    """
+
+    sheet: CharacterSheet | None = None
+
+
+class CharacterMilestone(BaseModel):
+    """A roster character reaching level 40 or 60 (``GET .../characters/milestones/pending``).
+
+    Mirrors the website's ``CharacterMilestoneSchema`` by hand: phase 4's milestone schema isn't in the
+    ``sidequest-common`` pin yet.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    slug: str
+    name: str
+    surname: str
+    wow_class: str | None = Field(default=None, alias="class")
+    level: int
+    reached_at: datetime
+    posted_at: datetime | None = None
+
+
+class MilestonePosted(BaseModel):
+    """Body for ``POST .../characters/milestones/{id}/posted``: the Discord message the bot posted."""
+
+    discord_message_id: int | None = None
+
+
+_CHARACTER_SUMMARIES = TypeAdapter(list[CharacterSummary])
+_PENDING_MILESTONES = TypeAdapter(list[CharacterMilestone])
 
 
 class APIError(Exception):
@@ -590,7 +678,27 @@ class SideQuestAPI:
         """Confirm one member's badge announcement posted, so ``sync_badges`` stops reporting it as pending."""
         await self._request("POST", f"{self._guild(guild_id)}/badges/ack", body=ack)
 
-    # --- Characters (roster sync)
+    # --- Characters
+
+    async def search_characters(self, query: str | None = None) -> list[CharacterSummary]:
+        """The guild roster (``query=None``), or up to 25 stored characters matching ``query``, roster first.
+
+        ``query`` needs 2+ characters (the public ``/api/characters/`` GET's ``q``).
+        """
+        params: dict[str, Any] = {}
+        if query is not None:
+            params["q"] = query
+        data = await self._request("GET", "/api/characters/", params=params)
+        return _parse(_CHARACTER_SUMMARIES.validate_python, data)
+
+    async def get_character(self, slug: str) -> CharacterPage:
+        """One character by its ``name-surname`` slug (the public ``/api/characters/{slug}`` GET).
+
+        Raises ``NotFoundError`` if Battle.net has no such character, or ``APIError`` (status 503) if Battle.net
+        didn't answer and the character was never stored.
+        """
+        data = await self._request("GET", f"/api/characters/{slug}")
+        return _parse(CharacterPage.model_validate, data)
 
     async def sync_roster(self, guild_id: int) -> RosterSyncReport:
         """Reconcile the website's character roster with the guild's current Discord/addon data.
@@ -600,6 +708,27 @@ class SideQuestAPI:
         """
         data = await self._request("POST", f"{self._guild(guild_id)}/characters/sync")
         return _parse(RosterSyncReport.model_validate, data)
+
+    # --- Character milestones
+
+    async def list_pending_milestones(self, guild_id: int) -> list[CharacterMilestone]:
+        """Level 40/60 milestones not yet posted to Discord, oldest first.
+
+        Raises ``NotFoundError`` for a non-site ``guild_id``.
+        """
+        data = await self._request("GET", f"{self._guild(guild_id)}/characters/milestones/pending")
+        return _parse(_PENDING_MILESTONES.validate_python, data)
+
+    async def mark_milestone_posted(self, guild_id: int, milestone_id: UUID, message_id: int | None) -> None:
+        """Record that ``milestone_id`` posted to Discord as ``message_id``.
+
+        Raises ``NotFoundError`` for an unknown milestone or a non-site ``guild_id``.
+        """
+        await self._request(
+            "POST",
+            f"{self._guild(guild_id)}/characters/milestones/{milestone_id}/posted",
+            body=MilestonePosted(discord_message_id=message_id),
+        )
 
     # --- Guild hub announcements
 

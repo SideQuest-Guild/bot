@@ -1,7 +1,7 @@
 """Typed HTTP client for the SideQuest API. The only way the bot talks to the API."""
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID
@@ -233,6 +233,105 @@ class MilestonePosted(BaseModel):
 
 _CHARACTER_SUMMARIES = TypeAdapter(list[CharacterSummary])
 _PENDING_MILESTONES = TypeAdapter(list[CharacterMilestone])
+
+AUCTION_TREND_DAYS = 14
+"""Days of daily price history ``get_item_price`` returns in ``trend`` (``sidequest-common`` ``AUCTION_TREND_DAYS``)."""
+MAX_AUCTION_WATCHES = 25
+"""Per-member cap on auction watches (``sidequest-common`` ``MAX_AUCTION_WATCHES``); upsert returns 409 past it."""
+
+
+class AuctionHousePrice(BaseModel):
+    """One auction house's current price for an item.
+
+    Mirrors the website's ``AuctionHousePrice`` by hand: the auctions schemas aren't in the ``sidequest-common``
+    pin yet.
+    """
+
+    house_id: int
+    house_name: str
+    unit_price: int
+    quantity: int
+    listings: int
+    updated_at: datetime
+
+
+class AuctionTrendPoint(BaseModel):
+    """One day's lowest price in a 14-day trend. Mirrors the website's ``AuctionTrendPoint`` by hand."""
+
+    day: date
+    unit_price: int
+
+
+class ItemAuctionPrice(BaseModel):
+    """``GET /api/auctions/prices/{item_id}``: an item's current price across every faction house, plus trend.
+
+    Mirrors the website's ``ItemAuctionPrice`` by hand. ``unit_price`` is the lowest across houses, ``None`` when
+    nobody lists the item.
+    """
+
+    item_id: int
+    unit_price: int | None
+    quantity_total: int
+    houses: list[AuctionHousePrice]
+    trend: list[AuctionTrendPoint]
+    updated_at: datetime | None
+
+
+class AuctionSyncHouse(BaseModel):
+    """One house's counts from an auction sync. Mirrors the website's ``AuctionSyncHouse`` by hand."""
+
+    house_id: int
+    house_name: str
+    auctions: int
+    commodities: int
+
+
+class AuctionSyncReport(BaseModel):
+    """``POST /api/guilds/{id}/auctions/sync``. Mirrors the website's ``AuctionSyncReport`` by hand."""
+
+    houses: list[AuctionSyncHouse]
+    items_priced: int
+    alerts_queued: int
+
+
+class AuctionWatch(BaseModel):
+    """A member's price watch on one item. Mirrors the website's ``AuctionWatch`` by hand."""
+
+    id: UUID
+    item_id: int
+    item_name: str | None
+    icon_url: str | None
+    max_unit_price: int
+    current_unit_price: int | None
+    created_at: datetime
+    last_alerted_at: datetime | None
+
+
+class AuctionWatchCreate(BaseModel):
+    """Body for ``POST .../auction-watches``: upserts by ``item_id``. Mirrors ``AuctionWatchCreate`` by hand."""
+
+    item_id: int = Field(gt=0)
+    max_unit_price: int = Field(ge=1, le=10_000_000_000)
+
+
+class AuctionAlertSchema(BaseModel):
+    """A queued price alert, ready to DM. Mirrors the website's ``AuctionAlertSchema`` by hand."""
+
+    id: UUID
+    discord_user_id: int
+    member_name: str
+    item_id: int
+    item_name: str | None
+    icon_url: str | None
+    unit_price: int
+    max_unit_price: int
+    quantity: int
+    house_name: str
+    created_at: datetime
+
+
+_AUCTION_WATCHES = TypeAdapter(list[AuctionWatch])
+_AUCTION_ALERTS = TypeAdapter(list[AuctionAlertSchema])
 
 
 class APIError(Exception):
@@ -808,3 +907,52 @@ class SideQuestAPI:
         """
         data = await self._request("GET", f"/api/items/{item_id}")
         return _parse(Item.model_validate, data)
+
+    # --- Auctions
+
+    async def get_item_price(self, item_id: int) -> ItemAuctionPrice:
+        """``item_id``'s current lowest price across the faction's houses, plus a 14-day trend (public).
+
+        Always 200, even for an unknown or unlisted item (``unit_price`` is ``None``, ``houses``/``trend`` empty).
+        """
+        data = await self._request("GET", f"/api/auctions/prices/{item_id}")
+        return _parse(ItemAuctionPrice.model_validate, data)
+
+    async def sync_auctions(self, guild_id: int) -> AuctionSyncReport:
+        """Fetch the faction's auction houses, rebuild prices, update history, and queue new alerts.
+
+        Raises ``NotFoundError`` for a non-site ``guild_id``, or ``APIError`` (status 503) if Battle.net didn't
+        answer.
+        """
+        data = await self._request("POST", f"{self._guild(guild_id)}/auctions/sync")
+        return _parse(AuctionSyncReport.model_validate, data)
+
+    async def pending_auction_alerts(self, guild_id: int) -> list[AuctionAlertSchema]:
+        """Queued price alerts not yet sent, oldest first. Raises ``NotFoundError`` for a non-site ``guild_id``."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/auctions/alerts/pending")
+        return _parse(_AUCTION_ALERTS.validate_python, data)
+
+    async def ack_auction_alert(self, guild_id: int, alert_id: UUID) -> None:
+        """Confirm ``alert_id`` was sent (or couldn't be), so ``pending_auction_alerts`` stops reporting it."""
+        await self._request("POST", f"{self._guild(guild_id)}/auctions/alerts/{alert_id}/sent")
+
+    async def list_auction_watches(self, guild_id: int, user_id: int) -> list[AuctionWatch]:
+        """``user_id``'s price watches. Raises ``NotFoundError`` if their Discord account isn't linked."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/members/{user_id}/auction-watches")
+        return _parse(_AUCTION_WATCHES.validate_python, data)
+
+    async def upsert_auction_watch(self, guild_id: int, user_id: int, watch: AuctionWatchCreate) -> AuctionWatch:
+        """Add or replace ``user_id``'s watch on ``watch.item_id``.
+
+        Raises ``NotFoundError`` if their Discord account isn't linked, or ``APIError`` (status 409) at
+        :data:`MAX_AUCTION_WATCHES` new watches.
+        """
+        data = await self._request("POST", f"{self._guild(guild_id)}/members/{user_id}/auction-watches", body=watch)
+        return _parse(AuctionWatch.model_validate, data)
+
+    async def delete_auction_watch(self, guild_id: int, user_id: int, item_id: int) -> None:
+        """Remove ``user_id``'s watch on ``item_id``.
+
+        Raises ``NotFoundError`` if their Discord account isn't linked, or if they have no watch on that item.
+        """
+        await self._request("DELETE", f"{self._guild(guild_id)}/members/{user_id}/auction-watches/{item_id}")

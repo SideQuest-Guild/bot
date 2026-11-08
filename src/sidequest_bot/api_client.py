@@ -17,6 +17,10 @@ from sidequest_common.schemas import (
     BadgeAck,
     BadgeSyncReport,
     ConfirmByDiscordRequest,
+    CouncilLogEntry,
+    CouncilLogKind,
+    CouncilLogPage,
+    CouncilPostedBody,
     DiscordEventReconcile,
     DiscordEventState,
     DiscordInterestReport,
@@ -461,6 +465,18 @@ class SideQuestAPI:
         """Apply only the fields set on ``changes``."""
         data = await self._request("PATCH", f"{self._guild(guild_id)}/config", body=changes, exclude_unset=True)
         return _parse(GuildConfigSchema.model_validate, data)
+
+    # --- Loot council
+
+    async def pending_council_log(self, guild_id: int) -> list[CouncilLogEntry]:
+        """Council decisions and voids not yet posted, oldest first (max 25, raises ``NotFoundError`` otherwise)."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/loot/council/pending")
+        return _parse(CouncilLogPage.model_validate, data).items
+
+    async def ack_council_log(self, guild_id: int, loot_id: UUID, kind: CouncilLogKind) -> None:
+        """Confirm ``loot_id``'s ``kind`` posted; ``pending_council_log`` stops reporting it."""
+        body = CouncilPostedBody(kind=kind)
+        await self._request("POST", f"{self._guild(guild_id)}/loot/council/{loot_id}/posted", body=body)
 
     # --- Member links
 

@@ -36,6 +36,9 @@ lives there.
   zero.
 - **Badges.** Earn one on the [Hall of Heroes](https://sidequest-guild.com/heroes/) and the bot gives you its role
   and says so in chat.
+- **Council loot.** When officers award a chase item, legendary/special/rare piece or crafted tier by council
+  decision in the addon, the bot posts it to the loot log channel with the item, winner, GP and the officers'
+  one-line reason. A later void gets a short follow-up note.
 - **Character roster.** Every 30 minutes the bot tells the website who's currently in the guild, so character pages,
   the roster and hero boards at [sidequest-guild.com](https://sidequest-guild.com) stay current with Discord and
   the in-game addon. When a roster character first reaches level 40 or 60, it's posted to the announcements
@@ -80,6 +83,7 @@ Server Settings, Integrations. Settings are saved in the API and apply at once.
 | `/lfg channel <channel>`, `/lfg pingrole <kind> [role]`, `/lfg status` | Manage Server | Picks the `#lfg` panel channel, sets a kind's opt-in ping role, or shows live groups. |
 | `/weeklyboard channel`, `/weeklyboard preview` | Manage Server | Picks the weekly board's channel, or shows you this week's board. |
 | `/badges channel`, `/badges sync` | Manage Server | Picks where badges are announced, or checks for new badges now. |
+| `/lootlog channel` | Manage Server | Picks where council loot decisions are posted. |
 | `/announcements channel` | Manage Server | Picks where announcements from the game and the website are posted. |
 | `/foreverfeed channel` | Manage Server | Picks where WoW: Forever news from Blizzard and Wowhead is posted. A new channel gets the latest three first. |
 | `/signups channel` | Manage Server | Picks where new sign-ins are posted, each with an **Approve** button for Quest Masters. |

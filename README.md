@@ -49,6 +49,11 @@ lives there.
   up as people sign up. A week with no events gets no cards.
 - **WoW: Forever news.** Every five minutes the bot checks Blizzard's own forum posts about WoW: Forever and
   Wowhead's WoW: Forever news, and posts each new one in the feed channel with a link to the full post.
+- **Addons.** `#addons`, right below `#rules`, lists the community addons the guild recommends for WoW: Forever,
+  grouped by who they're for (required for raids, suggested for raids, everyone, leveling, PvP), with a link to the
+  full catalog on the website. The bot creates the channel the first time it has addons to show, keeps it read-only
+  like `#rules`, and edits its own posts every ten minutes to stay in step with the website without ever reposting
+  unchanged content.
 - **Class halls.** Pick a class in `#choose-your-class` and you join that class's post in `#class-halls`.
 - **Group voice.** `#lfg` has one button per kind (Dungeon, Raid, World Boss, Leveling, PvP, Hangout). Click one and
   a voice channel opens right away, with a Join link and an **Add details** button to name it, add a note, flag

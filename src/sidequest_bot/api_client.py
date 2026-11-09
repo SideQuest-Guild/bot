@@ -12,6 +12,7 @@ from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_a
 
 from sidequest_common.schemas import (
     ActivityAck,
+    AddonSchema,
     AnnouncementPosted,
     AwayNowReport,
     BadgeAck,
@@ -92,6 +93,7 @@ _ROLE_RESETS = TypeAdapter(list[RoleResetCandidate])
 _WEEKLY_BOARD_EVENTS = TypeAdapter(list[WeeklyBoardEvent])
 _GROUP_SESSIONS = TypeAdapter(list[GroupSessionSchema])
 _XP_GRANTS = TypeAdapter(list[XPGrantResult])
+_ADDONS = TypeAdapter(list[AddonSchema])
 
 
 class ItemSummary(BaseModel):
@@ -693,6 +695,11 @@ class SideQuestAPI:
         """What roles and classes the guild is recruiting for (the public ``/api/recruiting`` GET)."""
         data = await self._request("GET", "/api/recruiting")
         return _parse(Recruiting.model_validate, data)
+
+    async def list_addons(self) -> list[AddonSchema]:
+        """Every recommended addon, by name (the public ``/api/addons`` GET)."""
+        data = await self._request("GET", "/api/addons")
+        return _parse(_ADDONS.validate_python, data)
 
     async def list_weekly_board_events(self, guild_id: int, start: datetime, end: datetime) -> list[WeeklyBoardEvent]:
         """Scheduled events starting in ``[start, end)``, soonest first, with their forum thread id and sign-ups."""

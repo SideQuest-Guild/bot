@@ -4,7 +4,8 @@ Objects are ``MagicMock``s with the real classes as spec, so ``isinstance`` chec
 setting permissions and adding roles change the fake's state, so a check after a plan runs sees what Discord would.
 """
 
-from collections.abc import Iterable
+import functools
+from collections.abc import AsyncIterator, Iterable
 from itertools import count
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -13,6 +14,9 @@ import discord
 
 _ids = count(900_000)
 
+BOT_USER_ID = 999_999_999
+"""The fake server's own bot account id. ``channel.send()``'s messages carry it as ``message.author.id``; a cog
+under test usually needs ``cog.bot.user = SimpleNamespace(id=BOT_USER_ID, bot=True)`` to recognize its own posts."""
 ChannelSpec = type[discord.abc.GuildChannel]
 
 
@@ -30,6 +34,68 @@ def make_role(role_id: int, name: str, *, permissions: discord.Permissions | Non
     return role
 
 
+def _bot_author() -> MagicMock:
+    author = MagicMock(spec=discord.ClientUser)
+    author.id = BOT_USER_ID
+    author.bot = True
+    return author
+
+
+async def _edit_message(message: MagicMock, **edit_kwargs: Any) -> None:
+    if "content" in edit_kwargs:
+        message.content = edit_kwargs["content"]
+    if "embeds" in edit_kwargs:
+        message.embeds = edit_kwargs["embeds"] or []
+    elif "embed" in edit_kwargs:
+        message.embeds = [edit_kwargs["embed"]] if edit_kwargs["embed"] else []
+
+
+async def _delete_message(channel: MagicMock, message: MagicMock) -> None:
+    if message in channel.messages:
+        channel.messages.remove(message)
+
+
+async def _channel_send(channel: MagicMock, content: str | None = None, **kwargs: Any) -> MagicMock:
+    embeds = kwargs.get("embeds") or ([kwargs["embed"]] if kwargs.get("embed") else [])
+    message = MagicMock(spec=discord.Message)
+    message.id = next(_ids)
+    message.author = _bot_author()
+    message.content = content
+    message.embeds = embeds
+    message.jump_url = f"https://discord.com/channels/1/{channel.id}/{message.id}"
+    message.edit = AsyncMock(side_effect=functools.partial(_edit_message, message))
+    message.delete = AsyncMock(side_effect=functools.partial(_delete_message, channel, message))
+    channel.messages.append(message)
+    return message
+
+
+async def _channel_history(
+    channel: MagicMock, *, limit: int | None = None, oldest_first: bool | None = None, **_kwargs: Any
+) -> AsyncIterator[MagicMock]:
+    items = list(channel.messages) if oldest_first else list(reversed(channel.messages))
+    if limit is not None:
+        items = items[:limit]
+    for message in items:
+        yield message
+
+
+async def _move_channel(channel: MagicMock, *, after: MagicMock | None = None, **_kwargs: Any) -> None:
+    siblings = channel.guild.channels
+    if channel in siblings:
+        siblings.remove(channel)
+    if after is None:
+        siblings.insert(0, channel)
+    else:
+        siblings.insert(siblings.index(after) + 1, channel)
+
+
+async def _channel_set_permissions(
+    channel: MagicMock, target: Any, *, overwrite: discord.PermissionOverwrite, **_kwargs: Any
+) -> None:
+    channel.overwrites[target] = overwrite
+    channel.permissions_synced = False
+
+
 def make_channel(
     spec: ChannelSpec,
     channel_id: int,
@@ -38,31 +104,27 @@ def make_channel(
     *,
     category: MagicMock | None = None,
 ) -> MagicMock:
-    """A channel or category. With ``overwrites=None`` in a category, it is synced to the category's access."""
+    """A channel or category. With ``overwrites=None`` in a category, it is synced to the category's access.
+
+    ``.guild`` starts ``None``; ``make_guild`` and its ``create_*`` methods set it, which ``.move()`` needs.
+    """
     channel = MagicMock(spec=spec)
     channel.id = channel_id
     channel.name = name
     channel.mention = f"<#{channel_id}>"
     channel.category = category
     channel.category_id = category.id if category is not None else None
+    channel.guild = None
     channel.overwrites = (
         dict(category.overwrites) if overwrites is None and category is not None else (overwrites or {})
     )
     channel.permissions_synced = category is not None and channel.overwrites == category.overwrites
     channel.overwrites_for.side_effect = lambda target: channel.overwrites.get(target, discord.PermissionOverwrite())
-
-    async def set_permissions(target: Any, *, overwrite: discord.PermissionOverwrite, **_kwargs: Any) -> None:
-        channel.overwrites[target] = overwrite
-        channel.permissions_synced = False
-
-    async def send(content: str, **_kwargs: Any) -> MagicMock:
-        message = MagicMock(spec=discord.Message)
-        message.content = content
-        message.jump_url = f"https://discord.com/channels/1/{channel_id}/{next(_ids)}"
-        return message
-
-    channel.set_permissions = AsyncMock(side_effect=set_permissions)
-    channel.send = AsyncMock(side_effect=send)
+    channel.messages: list[MagicMock] = []
+    channel.set_permissions = AsyncMock(side_effect=functools.partial(_channel_set_permissions, channel))
+    channel.send = AsyncMock(side_effect=functools.partial(_channel_send, channel))
+    channel.history = lambda **kwargs: _channel_history(channel, **kwargs)
+    channel.move = AsyncMock(side_effect=functools.partial(_move_channel, channel))
     return channel
 
 
@@ -112,6 +174,8 @@ def make_guild(roles: list[MagicMock], channels: list[MagicMock], members: list[
     guild.by_category.side_effect = by_category
     for member in members:
         member.guild = guild
+    for channel in channels:
+        channel.guild = guild
 
     async def create_role(**kwargs: Any) -> MagicMock:
         role = make_role(next(_ids), kwargs["name"], permissions=kwargs.get("permissions"))
@@ -125,6 +189,7 @@ def make_guild(roles: list[MagicMock], channels: list[MagicMock], members: list[
                 spec, next(_ids), name, dict(kwargs.get("overwrites") or {}), category=kwargs.get("category")
             )
             channel.created_with = kwargs
+            channel.guild = guild
             guild.channels.append(channel)
             return channel
 

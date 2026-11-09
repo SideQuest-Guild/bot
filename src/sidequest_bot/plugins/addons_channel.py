@@ -1,4 +1,4 @@
-"""Read-only ``#addons`` channel: the community addons the guild recommends, grouped by category.
+"""Read-only ``#addons`` channel: the addons the guild requires and suggests, grouped by category.
 
 Every ten minutes the bot fetches the catalog from the API and keeps ``#addons`` in the site guild (``WEB_GUILD_ID``)
 in sync: creates the channel below ``#rules`` with the same visibility the first time, then edits, posts or deletes
@@ -53,11 +53,13 @@ def _channel_topic(base_url: str) -> str:
 
 
 def build_intro(base_url: str) -> str:
-    """Plain-words explanation of the channel, posted as the first message."""
+    """Plain-words explanation of the channel, posted as the first message.
+
+    The link sits in ``<>`` so Discord adds no preview embed, which would make the intro never match on the next sync.
+    """
     return (
-        "Community addons the guild recommends for WoW: Forever, grouped by who they're for. **Required** addons "
-        "are expected on raid nights; everything else is optional but worth having. The full catalog, with "
-        f"versions and download links, is always at {base_url}/addons/."
+        "Addons for WoW: Forever, grouped by who they're for. Run the **Required for raids** ones on raid nights; "
+        f"the rest are suggestions. The same list, with versions, is at <{base_url}/addons/>."
     )
 
 
@@ -112,12 +114,16 @@ def render_posts(addons: Sequence[AddonSchema], base_url: str) -> list[RenderedP
     return posts
 
 
+def _embed_key(embed: discord.Embed) -> tuple[str | None, str | None, int | None]:
+    """What the bot sets on a category embed, compared field by field: Discord may add keys of its own to a sent one."""
+    return embed.title, embed.description, embed.colour.value if embed.colour is not None else None
+
+
 def _post_matches(message: discord.Message, post: RenderedPost) -> bool:
     """Whether ``message`` already shows ``post``'s content and embed, so editing it would be a no-op."""
     content_matches = (message.content or "") == (post.content or "")
-    embed_dicts = [embed.to_dict() for embed in message.embeds]
-    desired_embeds = [post.embed.to_dict()] if post.embed is not None else []
-    return content_matches and embed_dicts == desired_embeds
+    desired_embeds = [_embed_key(post.embed)] if post.embed is not None else []
+    return content_matches and [_embed_key(embed) for embed in message.embeds] == desired_embeds
 
 
 class AddonsChannelCog(commands.Cog):

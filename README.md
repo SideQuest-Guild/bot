@@ -19,7 +19,11 @@ lives there.
   30 minutes); otherwise a Quest Master confirms you. Until you sign in or are confirmed you hold *At the Gate* and
   see only the sign-in channel.
 - **Confirm in guild.** For someone who won't sign in on the website: a Quest Master right-clicks them, then Apps,
-  then **Confirm in guild**. They get *New Arrival* without *Signed the Ledger*.
+  then **Confirm in guild**, or approves a request posted from the gate (below). They get *New Arrival* without
+  *Signed the Ledger*.
+- **The gate.** `#sign-the-ledger` and `#guest-chat` explain how to get in and link to the site. Someone who'll
+  never sign in can press **I'd rather not sign in** in `#sign-the-ledger`, give their character name, and a
+  request lands in `#officer-chat` with a **Confirm in guild** button for a Quest Master.
 - **A welcome DM** when you first sign in, and a pinned **Start here** button in `#guest-chat` that shows it again.
 - **Levels.** XP comes from four places:
   - **Chat:** 15 to 25 XP per message, at most once a minute.
@@ -32,7 +36,8 @@ lives there.
   Event and group XP is checked every five minutes, and each event or group pays once. Level-ups from voice are
   announced in the voice channel's chat; from events and groups, in the server's system channel. A level-up
   channel set with `/levels` overrides both. Level roles from *Lv 5 · Wayfarer* to *Lv 50 · Legend* come on their
-  own. No-XP channels and roles apply to everything.
+  own; level roles don't stack, so members keep only their highest one. No-XP channels and roles apply to
+  everything.
 - **Server stats.** The bot keeps hourly counts of messages and time spent in voice with someone else outside the
   AFK channel, for every member, whether or not leveling itself is on. Officers see guild-wide stats and
   leaderboards on the website; every member sees their own chat, voice, event and group activity on their Hall of

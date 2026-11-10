@@ -434,11 +434,12 @@ class LinkRolesCog(commands.Cog):
 
     async def confirm_discord_member(
         self, interaction: discord.Interaction[SideQuestBot], target: discord.Member, clicker: discord.Member
-    ) -> None:
+    ) -> MemberLink | None:
         """Confirm ``target`` on the roster from Discord, creating their ``Member`` row if they have none.
 
         Builds ``profile`` the same way ``member_profiles``'s push does, then applies the resulting roster role
-        right away rather than waiting for the next sync tick.
+        right away rather than waiting for the next sync tick. Returns the resulting link on success, replying to
+        ``interaction`` itself either way; ``None`` means the caller already has its answer from the reply sent here.
         """
         guild = target.guild
         request = DiscordRosterConfirmRequest(
@@ -448,17 +449,18 @@ class LinkRolesCog(commands.Cog):
             link = await self.bot.api.confirm_discord_member(guild.id, target.id, request)
         except NotFoundError:
             await interaction.followup.send("This isn't the site's guild.", ephemeral=True)
-            return
+            return None
         except APIError as exc:
             if exc.status_code == HTTPStatus.FORBIDDEN:
                 await interaction.followup.send("Only Quest Masters can confirm members.", ephemeral=True)
-                return
+                return None
             logger.warning("Failed to confirm %s on the roster via Discord", target.id, exc_info=True)
             await interaction.followup.send("Couldn't reach the guild records; try again shortly.", ephemeral=True)
-            return
+            return None
         config = await self.bot.configs.get(guild.id)
         await self._apply_member(guild, target, config, {target.id: link})
         await interaction.followup.send(f"{target.mention} is confirmed on the roster.", ephemeral=True)
+        return link
 
 
 @app_commands.context_menu(name="Confirm in guild")

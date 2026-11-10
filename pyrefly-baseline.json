@@ -23,6 +23,27 @@
     },
     {
       "column": 15,
+      "path": "src/sidequest_bot/plugins/gate_messages.py",
+      "name": "bad-override",
+      "concise_description": "Class member `GateReviewModal.on_submit` overrides parent class `Modal` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/gate_messages.py",
+      "name": "bad-override",
+      "concise_description": "Class member `GateReviewButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/gate_messages.py",
+      "name": "bad-override",
+      "concise_description": "Class member `GateConfirmButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
       "path": "src/sidequest_bot/plugins/group_finder.py",
       "name": "bad-override",
       "concise_description": "Class member `SpawnButton.from_custom_id` overrides parent class `DynamicItem` in an inconsistent manner",
@@ -61,6 +82,27 @@
       "path": "src/sidequest_bot/plugins/group_finder.py",
       "name": "bad-override",
       "concise_description": "Class member `OpenVoiceButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `PugButton.from_custom_id` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `PugButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
+      "path": "src/sidequest_bot/plugins/group_finder.py",
+      "name": "bad-override",
+      "concise_description": "Class member `PugKindSelect.callback` overrides parent class `Select` in an inconsistent manner",
       "severity": "error"
     },
     {

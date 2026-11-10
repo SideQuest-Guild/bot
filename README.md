@@ -58,7 +58,11 @@ lives there.
   full catalog on the website. The bot creates the channel the first time it has addons to show, keeps it read-only
   like `#rules`, and edits its own posts every ten minutes to stay in step with the website without ever reposting
   unchanged content.
-- **Class halls.** Pick a class in `#choose-your-class` and you join that class's post in `#class-halls`.
+- **Roles.** `#roles`, right below `#addons`, lists every role in the server and how it's earned: guild ranks,
+  roles given by hand, automatic roles (gate, sign-in, Battle.net link, away, PUG, level and class roles), and
+  every Hall of Heroes badge. The bot creates the channel the first time (needs Manage Channels, like `#addons`),
+  keeps it read-only, and edits its own posts every ten minutes to stay in step with the guild config and badge
+  list without ever reposting unchanged content.
 - **Group voice.** `#lfg` has one button per kind (Dungeon, Raid, World Boss, Leveling, PvP, Hangout). Click one and
   a voice channel opens right away, with a Join link and an **Add details** button to name it, add a note, flag
   needed roles, invite members, and ping the kind's opt-in role. A live card in `#lfg` shows who's in it. The
@@ -70,7 +74,8 @@ lives there.
   channel and gives you an invite link for players outside the guild. Anyone who joins with it sees only that group's
   channel and `#sign-the-ledger`. Thirty minutes after the group ends, the bot removes them from the server, unless
   they signed the ledger or a Quest Master confirmed them. Each PUG group has its own temporary role, deleted when the
-  group ends.
+  group ends. Hosting earns badges: **Open Road** for the first PUG group that keeps an outside player and a guild
+  member together for ten minutes, **Crossroads Host** for ten of those, and **Caravan Master** for twenty-five.
 - **Server emoji.** Every role icon is also a server emoji named after it: `:warrior:`, `:mage:` and the other
   classes, the ranks such as `:quest_master:`, `:at_the_gate:`, and every badge such as `:first_steps:`. The bot adds
   any that are missing when it starts. It never changes or deletes an emoji, and leaves a name alone if the server

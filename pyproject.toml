@@ -36,8 +36,8 @@ dev = [
 ]
 
 [tool.uv.sources]
-sidequest-common = { git = "https://github.com/SideQuest-Guild/website", rev = "751e6c71eeb03052c9a2c4a9b2d835730e14b403", subdirectory = "packages/sidequest-common" }
-sidequest-api = { git = "https://github.com/SideQuest-Guild/website", rev = "751e6c71eeb03052c9a2c4a9b2d835730e14b403", subdirectory = "api" }
+sidequest-common = { git = "https://github.com/SideQuest-Guild/website", rev = "fef38bc17779176ba8904d0878d339c6b04c1454", subdirectory = "packages/sidequest-common" }
+sidequest-api = { git = "https://github.com/SideQuest-Guild/website", rev = "fef38bc17779176ba8904d0878d339c6b04c1454", subdirectory = "api" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

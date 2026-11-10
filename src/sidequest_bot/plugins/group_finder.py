@@ -78,7 +78,7 @@ from sidequest_common.schemas import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Collection, Iterable, Mapping, Sequence
 
     from sidequest_common.schemas import EventSummary, GuildConfigSchema
 
@@ -249,6 +249,11 @@ def tick_presence(
     return new_minutes, new_pairs, new_peak, new_grouped
 
 
+def tick_pug_minutes(pug_minutes: int, *, counted_ids: Collection[int], outsider_ids: Collection[int]) -> int:
+    """One minute's PUG-overlap tick: +1 when a counted guild member and an outside PUG player share the channel."""
+    return pug_minutes + (1 if counted_ids and outsider_ids else 0)
+
+
 def should_tear_down(empty_since: datetime | None, now: datetime) -> bool:
     """A channel empty (or never joined) for :data:`EMPTY_GRACE_SECONDS` or more should be torn down."""
     return empty_since is not None and (now - empty_since).total_seconds() >= EMPTY_GRACE_SECONDS
@@ -415,7 +420,11 @@ def build_presence_report(live: LiveGroup) -> GroupPresenceReport:
         for (a, b), minutes in live.pairs.items()
     ]
     return GroupPresenceReport(
-        peak_size=live.peak_size, grouped_minutes=live.grouped_minutes, members=members, pairs=pairs
+        peak_size=live.peak_size,
+        grouped_minutes=live.grouped_minutes,
+        pug_minutes=live.pug_minutes,
+        members=members,
+        pairs=pairs,
     )
 
 
@@ -453,6 +462,8 @@ class LiveGroup:
     """The card last drawn, so an unchanged card isn't edited again."""
     pug_role_id: int | None = None
     """Set for a PUG group: its temporary per-group Discord role."""
+    pug_minutes: int = 0
+    """Minutes with at least one counted guild member and one outside PUG player present together."""
     invite_code: str | None = None
     """Set for a PUG group whose invite is still live. Not persisted: lost (and not recreated) across a restart."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
@@ -970,6 +981,7 @@ class GroupFinderCog(commands.Cog):
             display_names={int(member.discord_id): member.display_name for member in session.members},
             peak_size=session.peak_size,
             grouped_minutes=session.grouped_minutes,
+            pug_minutes=session.pug_minutes,
             # The invite link itself isn't persisted, so a recovered PUG group's owner controls show no link until
             # the owner is told to make a fresh one (there's no API-side invite store to recreate it from).
             pug_role_id=int(session.pug_role_id) if session.pug_role_id else None,
@@ -1735,6 +1747,7 @@ class GroupFinderCog(commands.Cog):
                 peak_size=live.peak_size,
                 grouped_minutes=live.grouped_minutes,
             )
+            live.pug_minutes = tick_pug_minutes(live.pug_minutes, counted_ids=counted, outsider_ids=outsiders)
             if live.last_push_at is None or (now - live.last_push_at).total_seconds() >= PRESENCE_PUSH_INTERVAL_SECONDS:
                 await self._push_presence(guild, live)
                 live.last_push_at = now

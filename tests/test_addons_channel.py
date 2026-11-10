@@ -9,11 +9,11 @@ import discord
 import pytest
 
 from sidequest_bot.api_client import APIError, NotFoundError
+from sidequest_bot.lib.channel_sync import find_text_channel
 from sidequest_bot.plugins import addons_channel
 from sidequest_bot.plugins.addons_channel import (
     AddonsChannelCog,
     build_intro,
-    find_text_channel,
     render_posts,
 )
 from sidequest_common.schemas import ADDON_CATEGORY_LABELS, AddonCategory, AddonOrigin, AddonSchema

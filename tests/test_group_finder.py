@@ -25,6 +25,7 @@ from sidequest_bot.plugins.group_finder import (
     should_tear_down,
     slugify,
     tick_presence,
+    tick_pug_minutes,
 )
 from sidequest_common.schemas import GROUP_KINDS, EventKind, SignupRole
 
@@ -131,6 +132,20 @@ class TestTickPresence:
             present_ids=[], minutes={1: 5}, pairs={(1, 2): 3}, peak_size=2, grouped_minutes=4
         )
         assert (minutes, pairs, peak, grouped) == ({1: 5}, {(1, 2): 3}, 2, 4)
+
+
+class TestTickPugMinutes:
+    def test_rises_when_a_counted_member_and_an_outsider_share_the_channel(self) -> None:
+        assert tick_pug_minutes(5, counted_ids={1}, outsider_ids={2}) == 6
+
+    def test_unchanged_with_no_counted_members(self) -> None:
+        assert tick_pug_minutes(5, counted_ids=set(), outsider_ids={2}) == 5
+
+    def test_unchanged_with_no_outsiders(self) -> None:
+        assert tick_pug_minutes(5, counted_ids={1}, outsider_ids=set()) == 5
+
+    def test_unchanged_with_nobody_present(self) -> None:
+        assert tick_pug_minutes(5, counted_ids=set(), outsider_ids=set()) == 5
 
 
 class TestShouldTearDown:

@@ -1,6 +1,14 @@
 """Shared embed styling so every plugin's output looks like one bot."""
 
+from typing import TYPE_CHECKING, Final
+
 import discord
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+DESCRIPTION_LIMIT: Final = 4096
+"""Discord's hard cap on an embed's ``description``."""
 
 
 class Colors:
@@ -16,6 +24,25 @@ class Colors:
     SITE_GOLD = discord.Colour(0xD8AB5C)  # sidequest-guild.com's gold: public panels such as role menus
     BLIZZARD_BLUE = discord.Colour(0x148EFF)  # Blizzard blue posts in the WoW: Forever feed
     WOWHEAD_RED = discord.Colour(0xC41F1F)  # Wowhead articles in the WoW: Forever feed
+
+
+def pack_lines(lines: Sequence[str], limit: int = DESCRIPTION_LIMIT) -> list[str]:
+    """Greedily pack ``lines`` into newline-joined chunks no longer than ``limit`` characters."""
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        added = len(line) + (1 if current else 0)
+        if current and current_len + added > limit:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += added
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
 
 
 def make_embed(

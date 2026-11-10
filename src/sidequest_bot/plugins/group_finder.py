@@ -16,6 +16,14 @@ An event thread or weekly-board card can also carry an **Open voice** button (``
 group linked to that scheduled event instead of a fresh numbered one; while that group is live, ``attendance_voice``
 counts the event's voice minutes only from its channel.
 
+The panel's **PUG group** button (only usable once an officer sets ``GuildConfig.pug_role_id`` with ``/lfg
+pugrole``) spawns a ``pug-<kind>-<n>`` channel plus a temporary per-group role and an invite link whose Community
+Invites ``role_ids`` grant both the guild PUG role and the group role on join, so outside players land seeing only
+their group and #sign-the-ledger. A 60s sweep (``_pug_sweep``) lifts the guild PUG role once a joiner signs in or
+is confirmed, and kicks one who's held no live group's PUG role for 30 minutes — but only if every other role
+they hold is the guild PUG role, the gate role, or a group PUG role, so a joiner who picked up any other role is
+never kicked. Teardown deletes a PUG group's invite and role once the channel closes.
+
 Pure logic (name allocation, slugs, presence accumulation, teardown timing, owner succession, card/recap text) is
 unit tested directly; Discord I/O is exercised only through the plugin's effects, not mocked by hand.
 """
@@ -32,16 +40,18 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib.resources import files
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, cast
 from uuid import UUID
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from discord.http import Route
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.embeds import Colors
+from sidequest_bot.plugins.welcome import autorole_block_reason
 from sidequest_common.schemas import (
     EMPTY_GRACE_SECONDS,
     GROUP_KIND_DEFAULT_CAP,
@@ -90,6 +100,13 @@ MIN_GROUPED_MEMBERS = 2
 """Minimum non-bot members present for a minute to count toward ``grouped_minutes``."""
 MINUTES_PER_HOUR = 60
 
+PUG_PREFIX = "pug"
+PUG_SWEEP_INTERVAL_SECONDS = 60
+PUG_ORPHAN_KICK_SECONDS = 1800
+"""How long a PUG joiner may hold no live group's PUG role before being kicked for never signing the ledger."""
+PUG_INVITE_MAX_AGE_SECONDS = 86400
+PUG_ROLE_NAME_PREFIX = "PUG · "
+
 NEED_LABELS: dict[SignupRole, str] = {SignupRole.TANK: "Tank", SignupRole.HEALER: "Healer", SignupRole.DPS: "DPS"}
 NEED_EMOJI: dict[SignupRole, str] = {SignupRole.TANK: "🛡️", SignupRole.HEALER: "💚", SignupRole.DPS: "🗡️"}
 _NEED_OPTIONS = [
@@ -135,6 +152,8 @@ _OWNER_CUSTOM_ID_RE = re.compile(
     rf"^sq:lfg:owner:(?P<action>rename|cap|locktoggle|transfer|end):(?P<session_id>{_UUID_PATTERN})$"
 )
 _EVENT_CUSTOM_ID_RE = re.compile(rf"^sq:lfg:event:(?P<event_id>{_UUID_PATTERN})$")
+_PUG_CUSTOM_ID = "sq:lfg:pug"
+_PUG_CUSTOM_ID_RE = re.compile(r"^sq:lfg:pug$")
 
 _KIND_CHOICES = [app_commands.Choice(name=GROUP_KIND_LABELS[kind], value=kind.value) for kind in GROUP_KINDS]
 
@@ -192,6 +211,11 @@ def named_channel_name(kind: EventKind, slug: str, existing: set[str]) -> str:
         if candidate not in existing:
             return candidate
         suffix += 1
+
+
+def pug_channel_name(kind: EventKind, number: int) -> str:
+    """``pug-raid-1``, and so on: marks a PUG group's channel distinctly from a regular one of the same kind."""
+    return f"{PUG_PREFIX}-{default_channel_name(kind, number)}"
 
 
 def pair_key(a: int, b: int) -> tuple[int, int]:
@@ -252,6 +276,41 @@ def rename_cooldown_minutes(rename_times: Sequence[datetime], now: datetime) -> 
     oldest = min(recent)
     remaining = RENAME_WINDOW_SECONDS - (now - oldest).total_seconds()
     return max(1, math.ceil(remaining / 60))
+
+
+def pug_sweep_decision(
+    *,
+    member_role_ids: set[int],
+    assignable_role_ids: set[int],
+    linked_role_id: int | None,
+    roster_role_id: int | None,
+    pug_role_id: int,
+    gate_role_id: int | None,
+    group_pug_role_ids: set[int],
+    orphaned_since: datetime | None,
+    now: datetime,
+) -> Literal["none", "strip", "kick"]:
+    """What to do, this tick, about one member holding the guild's PUG role.
+
+    ``"strip"``: they're confirmed (hold ``linked_role_id`` or ``roster_role_id``) — the guild-wide PUG role is no
+    longer needed, though any per-group PUG role is left alone so they stay in their group. ``"kick"``: they've held
+    no live group's PUG role (``group_pug_role_ids``) for at least :data:`PUG_ORPHAN_KICK_SECONDS` since
+    ``orphaned_since``, AND every assignable role they hold besides ``@everyone`` is the guild PUG role, the gate
+    role, or a group PUG role — anyone holding any other role is never kicked. ``"none"`` otherwise, including while
+    still within a live group or not yet past the orphan window (the caller starts/clears ``orphaned_since``).
+    """
+    if (linked_role_id is not None and linked_role_id in member_role_ids) or (
+        roster_role_id is not None and roster_role_id in member_role_ids
+    ):
+        return "strip" if pug_role_id in member_role_ids else "none"
+    if member_role_ids & group_pug_role_ids:
+        return "none"
+    if orphaned_since is None or (now - orphaned_since).total_seconds() < PUG_ORPHAN_KICK_SECONDS:
+        return "none"
+    allowed = {pug_role_id, gate_role_id} | group_pug_role_ids
+    if assignable_role_ids - allowed:
+        return "none"
+    return "kick"
 
 
 def cap_pips(member_count: int, cap: int | None) -> str:
@@ -392,12 +451,21 @@ class LiveGroup:
     last_push_at: datetime | None = None
     last_card: CardContent | None = None
     """The card last drawn, so an unchanged card isn't edited again."""
+    pug_role_id: int | None = None
+    """Set for a PUG group: its temporary per-group Discord role."""
+    invite_code: str | None = None
+    """Set for a PUG group whose invite is still live. Not persisted: lost (and not recreated) across a restart."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     @property
     def display_name(self) -> str:
         """``name`` once set (e.g. by Add details), else the channel's current name."""
         return self.name or self.channel_name
+
+    @property
+    def invite_url(self) -> str | None:
+        """The PUG group's current invite link, or ``None`` if it isn't a PUG group or the invite is gone."""
+        return f"https://discord.gg/{self.invite_code}" if self.invite_code else None
 
 
 # --- Spawn panel ----------------------------------------------------------------------------------------------
@@ -436,6 +504,12 @@ def build_panel_layout() -> discord.ui.LayoutView:
                 accessory=_in_layout(SpawnButton(kind)),
             )
         )
+    container.add_item(
+        discord.ui.Section(
+            "**🌐 PUG group**\n-# Invite outside players; they see only their group and #sign-the-ledger",
+            accessory=_in_layout(PugButton()),
+        )
+    )
     container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
     container.add_item(
         discord.ui.TextDisplay(
@@ -463,8 +537,13 @@ def build_card_layout(content: CardContent, *, kind: EventKind, join_url: str) -
     return view
 
 
-def build_owner_controls_layout(session_id: UUID, *, kind: EventKind, locked: bool) -> discord.ui.LayoutView:
-    """The owner controls posted once in a group channel's text chat."""
+def build_owner_controls_layout(
+    session_id: UUID, *, kind: EventKind, locked: bool, invite_url: str | None = None
+) -> discord.ui.LayoutView:
+    """The owner controls posted once in a group channel's text chat.
+
+    ``invite_url`` adds a line with the PUG group's invite link, for a PUG group whose invite is still live.
+    """
     container = discord.ui.Container(accent_colour=KIND_COLORS[kind])
     container.add_item(
         discord.ui.TextDisplay(
@@ -480,6 +559,8 @@ def build_owner_controls_layout(session_id: UUID, *, kind: EventKind, locked: bo
             )
         )
     )
+    if invite_url is not None:
+        container.add_item(discord.ui.TextDisplay(f"🌐 **Invite link for outside players:** {invite_url}"))
     container.add_item(
         discord.ui.TextDisplay(
             "-# This channel closes 2 minutes after it empties. Chat here is kept 30 days for officers."
@@ -595,6 +676,59 @@ class OpenVoiceButton(discord.ui.DynamicItem[discord.ui.Button], template=_EVENT
         cog = interaction.client.get_cog("GroupFinderCog")
         if isinstance(cog, GroupFinderCog):
             await cog.handle_open_voice_click(interaction, event_id=self.event_id)
+
+
+class PugButton(discord.ui.DynamicItem[discord.ui.Button], template=_PUG_CUSTOM_ID_RE):
+    """The ``#lfg`` panel's PUG group row; carries no state of its own."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            discord.ui.Button(
+                style=discord.ButtonStyle.secondary, label="PUG group", emoji="🌐", custom_id=_PUG_CUSTOM_ID
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls, _interaction: discord.Interaction[SideQuestBot], _item: discord.ui.Item[Any], _match: re.Match[str], /
+    ) -> Self:
+        """Rebuild the button from a dispatched component after a restart."""
+        return cls()
+
+    async def callback(self, interaction: discord.Interaction[SideQuestBot]) -> None:
+        """Route the click to :meth:`GroupFinderCog.handle_pug_click`."""
+        cog = interaction.client.get_cog("GroupFinderCog")
+        if isinstance(cog, GroupFinderCog):
+            await cog.handle_pug_click(interaction)
+
+
+class PugKindSelect(discord.ui.Select["PugKindView"]):
+    """Ephemeral, one-shot kind picker for a new PUG group."""
+
+    def __init__(self, cog: GroupFinderCog) -> None:
+        super().__init__(
+            placeholder="Pick a group kind",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label=GROUP_KIND_LABELS[kind], value=kind.value, emoji=KIND_EMOJI[kind])
+                for kind in GROUP_KINDS
+            ],
+        )
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction[SideQuestBot]) -> None:
+        """Defer, then spawn the chosen kind as a PUG group via the cog."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self.cog.handle_pug_kind_chosen(interaction, kind=EventKind(self.values[0]))
+
+
+class PugKindView(discord.ui.View):
+    """Ephemeral view holding :class:`PugKindSelect`, shown after a PUG group click."""
+
+    def __init__(self, cog: GroupFinderCog) -> None:
+        super().__init__(timeout=120)
+        self.add_item(PugKindSelect(cog))
 
 
 class _DetailsButton(discord.ui.Button):
@@ -751,15 +885,20 @@ class GroupFinderCog(commands.Cog):
         self._card_debounce: dict[UUID, asyncio.Task[None]] = {}
         self._spawn_lock = asyncio.Lock()
         """Held from the limit checks through registering the new group, so two clicks can't share a name or limit."""
+        self._pug_orphan_since: dict[int, datetime] = {}
+        """Per-member clock for :func:`pug_sweep_decision`'s ``orphaned_since``. Reset by a restart (documented)."""
+        self._pug_kick_forbidden_warned: set[int] = set()
         self._presence_tick.start()
         self._teardown_tick.start()
         self._daily_purge.start()
+        self._pug_sweep.start()
 
     async def cog_unload(self) -> None:
         """Stop every loop and any pending debounced card refresh."""
         self._presence_tick.cancel()
         self._teardown_tick.cancel()
         self._daily_purge.cancel()
+        self._pug_sweep.cancel()
         for task in self._card_debounce.values():
             task.cancel()
 
@@ -831,6 +970,9 @@ class GroupFinderCog(commands.Cog):
             display_names={int(member.discord_id): member.display_name for member in session.members},
             peak_size=session.peak_size,
             grouped_minutes=session.grouped_minutes,
+            # The invite link itself isn't persisted, so a recovered PUG group's owner controls show no link until
+            # the owner is told to make a fresh one (there's no API-side invite store to recreate it from).
+            pug_role_id=int(session.pug_role_id) if session.pug_role_id else None,
         )
         present = {member.id for member in channel.members if not member.bot}
         live.ever_joined = bool(present) or bool(live.minutes)
@@ -915,6 +1057,61 @@ class GroupFinderCog(commands.Cog):
             name = default_channel_name(kind, number)
             await self._create_group(
                 interaction, kind=kind, category=category, name=name, event_id=None, display_name=None
+            )
+
+    async def handle_pug_click(self, interaction: discord.Interaction[SideQuestBot]) -> None:
+        """The PUG group panel button: permission/setup checks, then ask which kind to spawn."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        member = interaction.user
+        if guild is None or not isinstance(member, discord.Member):
+            return
+        config = await self.bot.configs.get(guild.id)
+        if not can_spawn(member, config.roster_role_id):
+            await interaction.followup.send("Only roster-confirmed members can start a group.", ephemeral=True)
+            return
+        if config.pug_role_id is None:
+            await interaction.followup.send(
+                "PUG groups aren't set up on this server yet; ask an officer to run `/lfg pugrole`.", ephemeral=True
+            )
+            return
+        await interaction.followup.send("Pick a kind for this PUG group:", view=PugKindView(self), ephemeral=True)
+
+    async def handle_pug_kind_chosen(self, interaction: discord.Interaction[SideQuestBot], *, kind: EventKind) -> None:
+        """The PUG kind select: re-checked permission/setup, then create the channel, role, overwrite and invite."""
+        guild = interaction.guild
+        member = interaction.user
+        if guild is None or not isinstance(member, discord.Member):
+            return
+        config = await self.bot.configs.get(guild.id)
+        if not can_spawn(member, config.roster_role_id):
+            await interaction.followup.send("Only roster-confirmed members can start a group.", ephemeral=True)
+            return
+        if config.pug_role_id is None:
+            await interaction.followup.send(
+                "PUG groups aren't set up on this server yet; ask an officer to run `/lfg pugrole`.", ephemeral=True
+            )
+            return
+        async with self._spawn_lock:
+            await self._ensure_recovered(guild)
+            if self._owned_live_group(member.id) is not None:
+                await interaction.followup.send(
+                    "You already have a live group; end it before starting another.", ephemeral=True
+                )
+                return
+            if len([live for live in self._groups.values() if live.guild_id == guild.id]) >= MAX_LIVE_GROUPS:
+                await interaction.followup.send(
+                    f"{MAX_LIVE_GROUPS} groups are already live; try again shortly.", ephemeral=True
+                )
+                return
+            category = await self._lfg_category(interaction, config)
+            if category is None:
+                return
+            prefix = f"{PUG_PREFIX}-{GROUP_KIND_PREFIX[kind]}"
+            number = allocate_group_number(extract_taken_numbers(self._taken_names(category), prefix))
+            name = pug_channel_name(kind, number)
+            await self._create_group(
+                interaction, kind=kind, category=category, name=name, event_id=None, display_name=None, pug=True
             )
 
     async def handle_open_voice_click(self, interaction: discord.Interaction[SideQuestBot], *, event_id: UUID) -> None:
@@ -1004,6 +1201,7 @@ class GroupFinderCog(commands.Cog):
         name: str,
         event_id: UUID | None,
         display_name: str | None,
+        pug: bool = False,
     ) -> None:
         guild = interaction.guild
         member = interaction.user
@@ -1024,6 +1222,20 @@ class GroupFinderCog(commands.Cog):
             return
         with contextlib.suppress(discord.HTTPException):
             await channel.edit(sync_permissions=True)
+        pug_extras: tuple[discord.Role, str] | None = None
+        if pug:
+            config = await self.bot.configs.get(guild.id)
+            pug_extras = await self._setup_pug_group(guild, channel, config)
+            if pug_extras is None:
+                with contextlib.suppress(discord.HTTPException):
+                    await channel.delete(reason="Failed to set up PUG group")
+                await interaction.followup.send(
+                    "Couldn't set up the PUG group — I may be missing Manage Roles or Create Invite; "
+                    "try again shortly or ask an officer to check my permissions.",
+                    ephemeral=True,
+                )
+                return
+        pug_role, invite_code = pug_extras if pug_extras is not None else (None, None)
         try:
             session = await self.bot.api.create_group(
                 guild.id,
@@ -1035,12 +1247,19 @@ class GroupFinderCog(commands.Cog):
                     cap=cap,
                     event_id=event_id,
                     name=display_name,
+                    pug_role_id=str(pug_role.id) if pug_role is not None else None,
                 ),
             )
         except APIError:
             logger.warning("Failed to record group session for channel %s", channel.id, exc_info=True)
             with contextlib.suppress(discord.HTTPException):
                 await channel.delete(reason="Failed to record group session")
+            if pug_role is not None:
+                with contextlib.suppress(discord.HTTPException):
+                    await pug_role.delete(reason="Failed to record group session")
+            if invite_code is not None:
+                with contextlib.suppress(discord.HTTPException):
+                    await self.bot.http.delete_invite(invite_code, reason="Failed to record group session")
             await interaction.followup.send("Couldn't reach the guild records; try again shortly.", ephemeral=True)
             return
         live = LiveGroup(
@@ -1058,6 +1277,8 @@ class GroupFinderCog(commands.Cog):
             event_id=event_id,
             card_message_id=None,
             started_at=session.started_at,
+            pug_role_id=pug_role.id if pug_role is not None else None,
+            invite_code=invite_code,
         )
         live.empty_since = datetime.now(UTC)
         self._groups[session.id] = live
@@ -1066,6 +1287,13 @@ class GroupFinderCog(commands.Cog):
         join_url = f"https://discord.com/channels/{guild.id}/{channel.id}"
         if event_id is not None:
             await interaction.followup.send(f"Opened {channel.mention}: {join_url}", ephemeral=True)
+            return
+        if pug:
+            await interaction.followup.send(
+                f"{KIND_EMOJI[kind]} {channel.mention} is yours. Share this invite link with outside players — "
+                f"they'll see only this group and #sign-the-ledger: {live.invite_url}",
+                ephemeral=True,
+            )
             return
         view = discord.ui.View(timeout=180)
         view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label="Join", url=join_url))
@@ -1077,10 +1305,67 @@ class GroupFinderCog(commands.Cog):
             ephemeral=True,
         )
 
+    async def _setup_pug_group(
+        self, guild: discord.Guild, channel: discord.VoiceChannel, config: GuildConfigSchema
+    ) -> tuple[discord.Role, str] | None:
+        """Create a PUG group's per-group role, overwrite, and invite link.
+
+        Grants ``role`` access to ``channel``, then invites it plus the guild PUG role on a fresh invite link.
+        Cleans up anything it created on failure and returns ``None``.
+        """
+        if config.pug_role_id is None:
+            return None
+        pug_role = guild.get_role(config.pug_role_id)
+        if pug_role is None:
+            return None
+        try:
+            group_role = await guild.create_role(
+                name=f"{PUG_ROLE_NAME_PREFIX}{channel.name}",
+                mentionable=False,
+                hoist=False,
+                reason="LFG: PUG group role",
+            )
+        except discord.Forbidden:
+            return None
+        try:
+            await channel.set_permissions(
+                group_role,
+                view_channel=True,
+                connect=True,
+                speak=True,
+                send_messages=True,
+                read_message_history=True,
+                use_voice_activation=True,
+                reason="LFG: PUG group access",
+            )
+        except discord.Forbidden:
+            with contextlib.suppress(discord.HTTPException):
+                await group_role.delete(reason="LFG: PUG group setup failed")
+            return None
+        try:
+            data = await self.bot.http.request(
+                Route("POST", "/channels/{channel_id}/invites", channel_id=channel.id),
+                reason="LFG: PUG group invite",
+                json={
+                    "max_age": PUG_INVITE_MAX_AGE_SECONDS,
+                    "max_uses": 0,
+                    "unique": True,
+                    "role_ids": [str(pug_role.id), str(group_role.id)],
+                },
+            )
+        except discord.HTTPException:
+            logger.warning("Failed to create PUG invite for channel %s", channel.id, exc_info=True)
+            with contextlib.suppress(discord.HTTPException):
+                await group_role.delete(reason="LFG: PUG group setup failed")
+            return None
+        return group_role, data["code"]
+
     async def _post_owner_controls(self, channel: discord.VoiceChannel, live: LiveGroup) -> None:
         try:
             await channel.send(
-                view=build_owner_controls_layout(live.session_id, kind=live.kind, locked=live.locked),
+                view=build_owner_controls_layout(
+                    live.session_id, kind=live.kind, locked=live.locked, invite_url=live.invite_url
+                ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
@@ -1216,7 +1501,9 @@ class GroupFinderCog(commands.Cog):
         if interaction.message is not None:
             with contextlib.suppress(discord.HTTPException):
                 await interaction.message.edit(
-                    view=build_owner_controls_layout(live.session_id, kind=live.kind, locked=live.locked)
+                    view=build_owner_controls_layout(
+                        live.session_id, kind=live.kind, locked=live.locked, invite_url=live.invite_url
+                    )
                 )
         await self._refresh_card(guild, live)
         await interaction.followup.send("Locked." if live.locked else "Unlocked.", ephemeral=True)
@@ -1433,8 +1720,16 @@ class GroupFinderCog(commands.Cog):
         async with live.lock:
             present = {member.id for member in channel.members if not member.bot}
             await self._update_presence_state(guild, live, present, now)
+            outsiders: set[int] = set()
+            if live.pug_role_id is not None:
+                # Only a PUG group can hold outside players. A failed config read counts them for one minute rather
+                # than letting the error stop this loop.
+                with contextlib.suppress(APIError):
+                    config = await self.bot.configs.get(guild.id)
+                    outsiders = self._pug_member_ids(guild, config.pug_role_id)
+            counted = present - outsiders
             live.minutes, live.pairs, live.peak_size, live.grouped_minutes = tick_presence(
-                present_ids=present,
+                present_ids=counted,
                 minutes=live.minutes,
                 pairs=live.pairs,
                 peak_size=live.peak_size,
@@ -1443,6 +1738,17 @@ class GroupFinderCog(commands.Cog):
             if live.last_push_at is None or (now - live.last_push_at).total_seconds() >= PRESENCE_PUSH_INTERVAL_SECONDS:
                 await self._push_presence(guild, live)
                 live.last_push_at = now
+
+    @staticmethod
+    def _pug_member_ids(guild: discord.Guild, pug_role_id: int | None) -> set[int]:
+        """Current holders of the guild's PUG role.
+
+        Excluded from group-stats minutes; they're outside players, not guild members.
+        """
+        if pug_role_id is None:
+            return set()
+        role = guild.get_role(pug_role_id)
+        return {member.id for member in role.members} if role is not None else set()
 
     async def _update_presence_state(
         self, guild: discord.Guild, live: LiveGroup, present: set[int], now: datetime
@@ -1566,6 +1872,18 @@ class GroupFinderCog(commands.Cog):
             if isinstance(channel, discord.VoiceChannel):
                 with contextlib.suppress(discord.NotFound, discord.Forbidden):
                     await channel.delete(reason=f"LFG teardown ({reason.value})")
+            if live.pug_role_id is not None:
+                await self._teardown_pug_extras(guild, live)
+
+    async def _teardown_pug_extras(self, guild: discord.Guild, live: LiveGroup) -> None:
+        """Delete a PUG group's invite and its temporary per-group role, after the normal teardown steps."""
+        if live.invite_code is not None:
+            with contextlib.suppress(discord.HTTPException):
+                await self.bot.http.delete_invite(live.invite_code, reason="LFG: PUG group ended")
+        role = guild.get_role(live.pug_role_id) if live.pug_role_id is not None else None
+        if role is not None:
+            with contextlib.suppress(discord.HTTPException):
+                await role.delete(reason="LFG: PUG group ended")
 
     # --- Daily transcript purge --------------------------------------------------------------------------------
 
@@ -1580,6 +1898,87 @@ class GroupFinderCog(commands.Cog):
     @_daily_purge.before_loop
     async def _before_daily_purge(self) -> None:
         await self.bot.wait_until_ready()
+
+    # --- PUG sweep -----------------------------------------------------------------------------------------
+
+    @tasks.loop(seconds=PUG_SWEEP_INTERVAL_SECONDS)
+    async def _pug_sweep(self) -> None:
+        now = datetime.now(UTC)
+        for guild in list(self.bot.guilds):
+            # Recover live groups first, so a restart never mistakes a PUG joiner in a live group for an orphan; a
+            # failed recovery leaves the guild unrecovered, and the sweep waits for the next tick.
+            await self._ensure_recovered(guild)
+            if guild.id not in self._recovered_guild_ids:
+                continue
+            try:
+                config = await self.bot.configs.get(guild.id)
+            except APIError:
+                # Must not escape: an unhandled exception stops a tasks.loop for good. Retried next tick.
+                logger.warning("PUG sweep skipped for guild %s", guild.id, exc_info=True)
+                continue
+            if config.pug_role_id is None:
+                continue
+            role = guild.get_role(config.pug_role_id)
+            if role is None:
+                continue
+            group_pug_role_ids = {
+                live.pug_role_id
+                for live in self._groups.values()
+                if live.guild_id == guild.id and live.pug_role_id is not None
+            }
+            for member in list(role.members):
+                await self._sweep_pug_member(guild, member, config, group_pug_role_ids, now)
+
+    @_pug_sweep.before_loop
+    async def _before_pug_sweep(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _sweep_pug_member(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        config: GuildConfigSchema,
+        group_pug_role_ids: set[int],
+        now: datetime,
+    ) -> None:
+        member_role_ids = {role.id for role in member.roles}
+        decision = pug_sweep_decision(
+            member_role_ids=member_role_ids,
+            assignable_role_ids={role.id for role in member.roles if role.is_assignable()},
+            linked_role_id=config.linked_role_id,
+            roster_role_id=config.roster_role_id,
+            pug_role_id=cast("int", config.pug_role_id),
+            gate_role_id=config.gate_role_id,
+            group_pug_role_ids=group_pug_role_ids,
+            orphaned_since=self._pug_orphan_since.get(member.id),
+            now=now,
+        )
+        if member_role_ids & group_pug_role_ids or (
+            (config.linked_role_id is not None and config.linked_role_id in member_role_ids)
+            or (config.roster_role_id is not None and config.roster_role_id in member_role_ids)
+        ):
+            self._pug_orphan_since.pop(member.id, None)
+        else:
+            self._pug_orphan_since.setdefault(member.id, now)
+        if decision == "strip":
+            pug_role = guild.get_role(cast("int", config.pug_role_id))
+            if pug_role is not None:
+                with contextlib.suppress(discord.HTTPException):
+                    await member.remove_roles(pug_role, reason="LFG: confirmed, PUG role no longer needed")
+        elif decision == "kick":
+            try:
+                await member.kick(reason="LFG: PUG group ended without signing the ledger")
+            except discord.Forbidden:
+                if member.id not in self._pug_kick_forbidden_warned:
+                    logger.warning(
+                        "Missing permission to kick %s for an ended PUG group in guild %s", member.id, guild.id
+                    )
+                    self._pug_kick_forbidden_warned.add(member.id)
+                return
+            except discord.HTTPException:
+                logger.warning("Failed to kick PUG joiner %s in guild %s", member.id, guild.id, exc_info=True)
+                return
+            self._pug_orphan_since.pop(member.id, None)
 
     # --- /lfg settings -----------------------------------------------------------------------------------------
 
@@ -1637,6 +2036,41 @@ class GroupFinderCog(commands.Cog):
         await self.bot.configs.update(guild.id, GuildConfigUpdate(lfg_ping_role_ids=ping_role_ids))
         await interaction.response.send_message(message + warning, ephemeral=True)
 
+    @lfg_group.command(name="pugrole", description="Set (or clear) the role PUG invites grant to outside players.")
+    @app_commands.describe(role="Role every PUG group invite grants; omit to disable PUG groups.")
+    async def lfg_pugrole(
+        self, interaction: discord.Interaction[SideQuestBot], role: discord.Role | None = None
+    ) -> None:
+        """Update ``GuildConfig.pug_role_id`` after checking the invoker may configure it and the bot may grant it.
+
+        Replies with the channels ``role`` can currently see, so the admin can tell at a glance whether it's hidden
+        down to #sign-the-ledger as intended before sharing any PUG invite links.
+        """
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        if role is not None:
+            reason = autorole_block_reason(interaction.user, role)
+            if reason is not None:
+                await interaction.response.send_message(reason, ephemeral=True)
+                return
+        await self.bot.configs.update(guild.id, GuildConfigUpdate(pug_role_id=role.id if role else None))
+        if role is None:
+            await interaction.response.send_message("PUG groups disabled.", ephemeral=True)
+            return
+        visible = [
+            channel.mention
+            for channel in guild.channels
+            if isinstance(channel, discord.TextChannel | discord.VoiceChannel)
+            and channel.permissions_for(role).view_channel
+        ]
+        listing = ", ".join(visible) if visible else "nothing (fully hidden)"
+        await interaction.response.send_message(
+            f"PUG invites will grant {role.mention}. It can currently see: {listing}. Hide everything but "
+            "#sign-the-ledger so outside players can't wander the server.",
+            ephemeral=True,
+        )
+
     @lfg_group.command(name="status", description="Show the LFG panel channel, ping roles, and live groups.")
     async def lfg_status(self, interaction: discord.Interaction[SideQuestBot]) -> None:
         """Ephemeral summary of the current LFG configuration and live groups."""
@@ -1656,6 +2090,11 @@ class GroupFinderCog(commands.Cog):
             lines.append("Ping roles: " + ", ".join(role_lines))
         else:
             lines.append("Ping roles: none set")
+        if config.pug_role_id is not None:
+            pug_role = guild.get_role(config.pug_role_id)
+            lines.append(f"PUG role: {pug_role.mention if pug_role else config.pug_role_id}")
+        else:
+            lines.append("PUG role: not set (PUG group button disabled)")
         live_here = [live for live in self._groups.values() if live.guild_id == guild.id]
         if live_here:
             lines.append(f"Live groups ({len(live_here)}):")
@@ -1669,5 +2108,5 @@ class GroupFinderCog(commands.Cog):
 
 async def setup(bot: SideQuestBot) -> None:
     """Register the persistent buttons and the cog."""
-    bot.add_dynamic_items(SpawnButton, OwnerControlButton, OpenVoiceButton)
+    bot.add_dynamic_items(SpawnButton, OwnerControlButton, OpenVoiceButton, PugButton)
     await bot.add_cog(GroupFinderCog(bot))

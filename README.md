@@ -14,8 +14,12 @@ lives there.
   **Maybe** and **Can't** buttons. For a raid or dungeon the bot asks for your character, class and role the first
   time, then reuses them. Sign-ups made here and on the website are the same sign-up.
 - **Roles from the website.** Sign in on the website and you get *Signed the Ledger*. Link Battle.net and you get
-  *Battle-Tagged*. When a Quest Master confirms you are in the guild in game, you get *New Arrival* and the guild
-  channels open. Until you sign in you hold *At the Gate* and see only the sign-in channel.
+  *Battle-Tagged*. When you're confirmed in the guild in game, you get *New Arrival* and the guild channels open.
+  Linking Battle.net confirms you by itself once one of your characters is on the guild roster (the bot checks every
+  30 minutes); otherwise a Quest Master confirms you. Until you sign in or are confirmed you hold *At the Gate* and
+  see only the sign-in channel.
+- **Confirm in guild.** For someone who won't sign in on the website: a Quest Master right-clicks them, then Apps,
+  then **Confirm in guild**. They get *New Arrival* without *Signed the Ledger*.
 - **A welcome DM** when you first sign in, and a pinned **Start here** button in `#guest-chat` that shows it again.
 - **Levels.** XP comes from four places:
   - **Chat:** 15 to 25 XP per message, at most once a minute.
@@ -62,6 +66,11 @@ lives there.
   the longest-present member takes over. A channel that stays empty for two minutes, or that nobody joins, goes away;
   its chat is kept for officers for 30 days. Every event thread and weekly-board card has an **Open voice** button that
   opens a group voice channel for that event, or links the one already open.
+- **PUG groups.** The **PUG group** button in `#lfg` asks what kind of group, then opens a `pug-raid-1` style voice
+  channel and gives you an invite link for players outside the guild. Anyone who joins with it sees only that group's
+  channel and `#sign-the-ledger`. Thirty minutes after the group ends, the bot removes them from the server, unless
+  they signed the ledger or a Quest Master confirmed them. Each PUG group has its own temporary role, deleted when the
+  group ends.
 - **Server emoji.** Every role icon is also a server emoji named after it: `:warrior:`, `:mage:` and the other
   classes, the ranks such as `:quest_master:`, `:at_the_gate:`, and every badge such as `:first_steps:`. The bot adds
   any that are missing when it starts. It never changes or deletes an emoji, and leaves a name alone if the server
@@ -85,7 +94,7 @@ Server Settings, Integrations. Settings are saved in the API and apply at once.
 | Command | Needs | What it does |
 |---|---|---|
 | `/eventsync forum [channel]` | Manage Server | Picks the forum for event threads. |
-| `/lfg channel <channel>`, `/lfg pingrole <kind> [role]`, `/lfg status` | Manage Server | Picks the `#lfg` panel channel, sets a kind's opt-in ping role, or shows live groups. |
+| `/lfg channel <channel>`, `/lfg pingrole <kind> [role]`, `/lfg pugrole [role]`, `/lfg status` | Manage Server | Picks the `#lfg` panel channel, sets a kind's opt-in ping role, sets the role PUG invites give, or shows live groups. `/lfg pugrole` lists the channels that role can still see; hide all but `#sign-the-ledger`. |
 | `/weeklyboard channel`, `/weeklyboard preview` | Manage Server | Picks the weekly board's channel, or shows you this week's board. |
 | `/badges channel`, `/badges sync` | Manage Server | Picks where badges are announced, or checks for new badges now. |
 | `/lootlog channel` | Manage Server | Picks where council loot decisions are posted. |
@@ -183,7 +192,9 @@ In the Developer Portal, turn on the **Server Members** and **Message Content** 
 Channels**, **Send Messages in Threads** and **Create Posts**. Group voice needs **Manage Channels** (create and
 delete voice channels, rename them, change their user limit), **Manage Roles** (lock/unlock overwrites) and **Read
 Message History** (transcripts); it also needs **Mention Everyone** if a kind's opt-in ping role isn't itself
-mentionable. The AI helper also needs **Manage Roles** and **Manage Channels** to carry out approved plans.
+mentionable. PUG groups also need **Create Invite**, and **Kick Members** to remove outside players afterwards; the
+PUG role must sit below the bot's top role. The AI helper also needs **Manage Roles** and **Manage Channels** to carry
+out approved plans.
 
 Put these in a `.env` file or in your shell:
 

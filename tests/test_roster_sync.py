@@ -80,6 +80,14 @@ class TestDescribeSync:
         assert "3 profile(s) refreshed" in summary
         assert "1 character(s) linked" in summary
 
+    def test_reports_members_confirmed_from_the_battlenet_roster(self) -> None:
+        summary = describe_sync(_report(members_confirmed=2))
+        assert summary is not None
+        assert "2 member(s) confirmed on the roster" in summary
+
+    def test_members_confirmed_alone_is_not_nothing(self) -> None:
+        assert describe_sync(_report(members_confirmed=1)) is not None
+
 
 class TestSyncLoop:
     async def test_not_found_retries_next_tick_and_recovers(self) -> None:

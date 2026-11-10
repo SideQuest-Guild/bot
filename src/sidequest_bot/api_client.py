@@ -27,6 +27,7 @@ from sidequest_common.schemas import (
     DiscordInterestReport,
     DiscordLiveReport,
     DiscordPushAck,
+    DiscordRosterConfirmRequest,
     DiscordSyncPending,
     EventSummary,
     GroupPresenceReport,
@@ -151,6 +152,8 @@ class RosterSyncReport(BaseModel):
     left: list[str]
     profiles_refreshed: int
     characters_linked: int
+    members_confirmed: int = 0
+    """Members newly confirmed on the guild roster because one of their Battle.net characters is in it."""
 
 
 class CharacterGearItem(BaseModel):
@@ -486,6 +489,18 @@ class SideQuestAPI:
         """Every signed-in member of ``guild_id``, and whether they've also linked Battle.net."""
         data = await self._request("GET", f"{self._guild(guild_id)}/member-links")
         return _parse(_MEMBER_LINKS.validate_python, data)
+
+    async def confirm_discord_member(
+        self, guild_id: int, discord_id: int, request: DiscordRosterConfirmRequest
+    ) -> MemberLink:
+        """**Confirm in guild**: confirm a Discord-only member on the roster.
+
+        Creates their ``Member`` row from ``request.profile`` if they have none, else refreshes it.
+        """
+        data = await self._request(
+            "PUT", f"{self._guild(guild_id)}/discord-members/{discord_id}/roster-confirmation", body=request
+        )
+        return _parse(MemberLink.model_validate, data)
 
     # --- Away
 

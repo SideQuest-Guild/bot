@@ -19,6 +19,8 @@ from sidequest_bot.plugins.group_finder import (
     named_channel_name,
     next_owner,
     pair_key,
+    pug_channel_name,
+    pug_sweep_decision,
     rename_cooldown_minutes,
     should_tear_down,
     slugify,
@@ -286,3 +288,75 @@ class TestBuildOpenVoiceCustomId:
     def test_carries_only_the_event_id(self) -> None:
         event_id = uuid4()
         assert build_open_voice_custom_id(event_id) == f"sq:lfg:event:{event_id}"
+
+
+class TestPugChannelName:
+    def test_marks_the_channel_as_pug_with_kind_and_number(self) -> None:
+        assert pug_channel_name(EventKind.RAID, 1) == "pug-raid-1"
+        assert pug_channel_name(EventKind.DUNGEON, 2) == "pug-dungeon-2"
+
+
+class TestPugSweepDecision:
+    _NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def _decide(self, **overrides: object) -> str:
+        base: dict[str, object] = {
+            "member_role_ids": set(),
+            "assignable_role_ids": set(),
+            "linked_role_id": 10,
+            "roster_role_id": 11,
+            "pug_role_id": 1,
+            "gate_role_id": 12,
+            "group_pug_role_ids": set(),
+            "orphaned_since": None,
+            "now": self._NOW,
+        }
+        base.update(overrides)
+        return pug_sweep_decision(**base)  # type: ignore[arg-type]
+
+    def test_strips_once_signed_in(self) -> None:
+        assert self._decide(member_role_ids={1, 10}) == "strip"
+
+    def test_strips_once_roster_confirmed(self) -> None:
+        assert self._decide(member_role_ids={1, 11}) == "strip"
+
+    def test_confirmed_but_no_longer_holding_pug_role_is_a_no_op(self) -> None:
+        assert self._decide(member_role_ids={10}) == "none"
+
+    def test_still_in_a_live_group_is_never_orphaned(self) -> None:
+        assert self._decide(member_role_ids={1, 20}, group_pug_role_ids={20}, orphaned_since=self._NOW) == "none"
+
+    def test_no_orphan_clock_yet_is_none(self) -> None:
+        assert self._decide(member_role_ids={1}, orphaned_since=None) == "none"
+
+    def test_within_the_grace_window_is_none(self) -> None:
+        since = self._NOW - timedelta(minutes=10)
+        assert self._decide(member_role_ids={1}, orphaned_since=since) == "none"
+
+    def test_kicked_once_orphaned_past_the_window_holding_only_allowed_roles(self) -> None:
+        since = self._NOW - timedelta(minutes=31)
+        assert (
+            self._decide(member_role_ids={1}, assignable_role_ids={1, 12}, orphaned_since=since, now=self._NOW)
+            == "kick"
+        )
+
+    def test_never_kicked_while_holding_any_other_role(self) -> None:
+        since = self._NOW - timedelta(minutes=31)
+        assert (
+            self._decide(member_role_ids={1}, assignable_role_ids={1, 12, 999}, orphaned_since=since, now=self._NOW)
+            == "none"
+        )
+
+    def test_kicked_at_exactly_the_orphan_window(self) -> None:
+        since = self._NOW - timedelta(seconds=1800)
+        assert (
+            self._decide(member_role_ids={1}, assignable_role_ids={1, 12}, orphaned_since=since, now=self._NOW)
+            == "kick"
+        )
+
+    def test_not_kicked_just_under_the_orphan_window(self) -> None:
+        since = self._NOW - timedelta(seconds=1799)
+        assert (
+            self._decide(member_role_ids={1}, assignable_role_ids={1, 12}, orphaned_since=since, now=self._NOW)
+            == "none"
+        )

@@ -8,6 +8,7 @@ from sidequest_bot.plugins.signup_notices import (
     GUEST_STATUS_TEXT,
     STATUS_FIELD_NAME,
     SignupApproveButton,
+    SignupNoticesCog,
     apply_approval_status,
     avatar_url,
     build_custom_id,
@@ -17,7 +18,7 @@ from sidequest_bot.plugins.signup_notices import (
     more_info_url,
     parse_custom_id,
 )
-from sidequest_common.schemas import SignupNoticeCandidate
+from sidequest_common.schemas import SignupNoticeCandidate, SignupNoticeResolution
 
 
 def _candidate(**overrides: object) -> SignupNoticeCandidate:
@@ -99,6 +100,11 @@ class TestBuildNoticeEmbed:
         embed = build_notice_embed(_candidate(battletag=None))
         assert all(f.name != "BattleTag" for f in embed.fields)
 
+    def test_confirmed_from_roster_shows_automatic_status(self) -> None:
+        embed = build_notice_embed(_candidate(confirmed_from_roster=True))
+        status_field = next(f for f in embed.fields if f.name == STATUS_FIELD_NAME)
+        assert status_field.value == signup_notices.CONFIRMED_FROM_ROSTER_TEXT
+
 
 class TestApplyApprovalStatus:
     def test_replaces_existing_status_field(self) -> None:
@@ -153,3 +159,56 @@ class TestApproveCallback:
         guild_id, member_id, request = interaction.client.api.confirm_roster_from_notice.await_args.args
         assert (guild_id, member_id) == (42, 77)
         assert request.actor_discord_id == "9001"
+
+
+def _resolution(**overrides: object) -> SignupNoticeResolution:
+    base: dict[str, object] = {
+        "member_id": 1,
+        "discord_id": "123456789012345678",
+        "display_name": "Jaina",
+        "channel_id": "555",
+        "message_id": "777",
+        "confirmed_by": None,
+    }
+    base.update(overrides)
+    return SignupNoticeResolution.model_validate(base)
+
+
+class TestResolveNotice:
+    @staticmethod
+    def _cog(*, api: AsyncMock | None = None) -> SignupNoticesCog:
+        cog = SignupNoticesCog.__new__(SignupNoticesCog)
+        cog.bot = SimpleNamespace(api=api or AsyncMock())
+        return cog
+
+    async def test_confirmed_from_roster_shows_automatic_status(self) -> None:
+        embed = build_notice_embed(_candidate())
+        message = Mock()
+        message.embeds = [embed]
+        message.edit = AsyncMock()
+        channel = Mock(spec=discord.TextChannel)
+        channel.fetch_message = AsyncMock(return_value=message)
+        guild = SimpleNamespace(id=42)
+        cog = self._cog()
+
+        await cog._resolve_notice(guild, channel, _resolution(confirmed_from_roster=True))
+
+        updated_embed = message.edit.await_args.kwargs["embed"]
+        status_field = next(f for f in updated_embed.fields if f.name == STATUS_FIELD_NAME)
+        assert status_field.value == signup_notices.CONFIRMED_FROM_ROSTER_TEXT
+
+    async def test_site_confirmation_names_the_confirming_gm(self) -> None:
+        embed = build_notice_embed(_candidate())
+        message = Mock()
+        message.embeds = [embed]
+        message.edit = AsyncMock()
+        channel = Mock(spec=discord.TextChannel)
+        channel.fetch_message = AsyncMock(return_value=message)
+        guild = SimpleNamespace(id=42)
+        cog = self._cog()
+
+        await cog._resolve_notice(guild, channel, _resolution(confirmed_by="Coffee"))
+
+        updated_embed = message.edit.await_args.kwargs["embed"]
+        status_field = next(f for f in updated_embed.fields if f.name == STATUS_FIELD_NAME)
+        assert status_field.value == "Approved on the site by Coffee"

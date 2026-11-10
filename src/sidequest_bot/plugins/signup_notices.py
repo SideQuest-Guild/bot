@@ -3,11 +3,13 @@
 Every 60 s, for each guild with ``signup_notice_channel_id`` configured: pull members with no notice posted yet
 (``GET /api/guilds/{guild_id}/signup-notices``), post one embed per member with a persistent **Approve** button
 (``sq:sn:approve:<member_id>``) and a **More info** link button to the member's detail on the Officers page, then
-ack each post so it isn't posted again. Also pulls posted notices that were confirmed since (e.g. on the site) and
-edits their message to say so, so officers reading the channel never see a stale "Guest" notice for someone already
-on the roster. Clicking Approve re-checks the clicker holds a ``WEB_GM_ROLE_IDS`` role, then confirms the notice's
-member (by site member id) through the same roster-confirmation the GM console uses, with the clicker's Discord id as
-the acting GM, and edits the message in place.
+ack each post so it isn't posted again. A candidate already ``confirmed_from_roster`` (one of their Battle.net
+characters was already in the in-game guild when they signed in) posts with its Approve button disabled and its
+status saying so, instead of "Guest". Also pulls posted notices that were confirmed since (e.g. on the site, or
+automatically from the roster) and edits their message to say so, so officers reading the channel never see a
+stale "Guest" notice for someone already on the roster. Clicking Approve re-checks the clicker holds a
+``WEB_GM_ROLE_IDS`` role, then confirms the notice's member (by site member id) through the same roster-
+confirmation the GM console uses, with the clicker's Discord id as the acting GM, and edits the message in place.
 """
 
 import logging
@@ -39,6 +41,7 @@ CUSTOM_ID_RE: Final = re.compile(r"^sq:sn:approve:(?P<member_id>\d+)$")
 
 STATUS_FIELD_NAME = "Status"
 GUEST_STATUS_TEXT = "Guest until a Quest Master approves."
+CONFIRMED_FROM_ROSTER_TEXT = "Confirmed automatically from the Battle.net guild roster."
 
 
 @lru_cache(maxsize=1)
@@ -80,7 +83,7 @@ def clicker_is_gm(role_ids: set[int], gm_role_ids: list[int]) -> bool:
 
 
 def build_notice_embed(candidate: SignupNoticeCandidate) -> discord.Embed:
-    """The notice embed for one new sign-in: name, avatar, BattleTag if linked, and a Guest status field."""
+    """The notice embed for one new sign-in: name, avatar, BattleTag if linked, and a Guest/confirmed status field."""
     embed = make_embed(
         "New signature in the Ledger",
         f"{candidate.display_name} (@{candidate.username})",
@@ -89,7 +92,8 @@ def build_notice_embed(candidate: SignupNoticeCandidate) -> discord.Embed:
     embed.set_thumbnail(url=avatar_url(int(candidate.discord_id), candidate.avatar_hash))
     if candidate.battletag:
         embed.add_field(name="BattleTag", value=candidate.battletag, inline=True)
-    embed.add_field(name=STATUS_FIELD_NAME, value=GUEST_STATUS_TEXT, inline=False)
+    status = CONFIRMED_FROM_ROSTER_TEXT if candidate.confirmed_from_roster else GUEST_STATUS_TEXT
+    embed.add_field(name=STATUS_FIELD_NAME, value=status, inline=False)
     return embed
 
 
@@ -231,7 +235,11 @@ class SignupNoticesCog(commands.Cog):
         self, guild: discord.Guild, channel: discord.TextChannel, candidate: SignupNoticeCandidate
     ) -> None:
         embed = build_notice_embed(candidate)
-        view = build_notice_view(candidate.member_id, more_info_url(_web_settings().BASE_URL, candidate.member_id))
+        view = build_notice_view(
+            candidate.member_id,
+            more_info_url(_web_settings().BASE_URL, candidate.member_id),
+            approved=candidate.confirmed_from_roster,
+        )
         try:
             message = await channel.send(embed=embed, view=view)
         except discord.HTTPException:
@@ -257,7 +265,10 @@ class SignupNoticesCog(commands.Cog):
         if not message.embeds:
             return
         who = resolution.confirmed_by or "a Quest Master"
-        updated_embed = apply_approval_status(message.embeds[0], f"Approved on the site by {who}")
+        status_text = (
+            CONFIRMED_FROM_ROSTER_TEXT if resolution.confirmed_from_roster else f"Approved on the site by {who}"
+        )
+        updated_embed = apply_approval_status(message.embeds[0], status_text)
         view = build_notice_view(
             resolution.member_id, more_info_url(_web_settings().BASE_URL, resolution.member_id), approved=True
         )

@@ -105,12 +105,15 @@ def voice_xp_earners(guild: discord.Guild, config: GuildConfigSchema) -> dict[in
     return earners
 
 
-def voice_present_members(guild: discord.Guild) -> dict[int, VoiceChannel]:
+def voice_present_members(guild: discord.Guild, *, pug_role_id: int | None = None) -> dict[int, VoiceChannel]:
     """Members present under the server-stats rule this minute, each with the channel they're in.
 
     A channel counts when at least ``MIN_VOICE_COMPANY`` non-bot members are in it, deafened or not, and it isn't the
     AFK channel. Unlike :func:`voice_xp_earners`, no-XP channels/roles and ``leveling_enabled`` don't apply: this is
-    presence for server stats, not voice XP eligibility.
+    presence for server stats, not voice XP eligibility. ``pug_role_id`` excludes current holders of the guild's PUG
+    role (``GuildConfig.pug_role_id``): they're outside players in a PUG group's voice channel, not guild members,
+    so server stats shouldn't count them (XP eligibility is excluded instead by adding the role to
+    ``no_xp_role_ids``, no code change needed).
     """
     afk_id = guild.afk_channel.id if guild.afk_channel is not None else None
     present: dict[int, VoiceChannel] = {}
@@ -121,7 +124,8 @@ def voice_present_members(guild: discord.Guild) -> dict[int, VoiceChannel]:
         if len(members) < MIN_VOICE_COMPANY:
             continue
         for member in members:
-            present[member.id] = channel
+            if pug_role_id is None or not any(role.id == pug_role_id for role in member.roles):
+                present[member.id] = channel
     return present
 
 
@@ -196,7 +200,7 @@ class LevelingCog(commands.Cog):
         """Give this minute's voice XP, report presence for stats, and announce any level-ups."""
         config = await self.bot.configs.get(guild.id)
         earners = voice_xp_earners(guild, config)
-        present = voice_present_members(guild)
+        present = voice_present_members(guild, pug_role_id=config.pug_role_id)
         if not present:
             return
         grants = await self.bot.api.grant_voice_xp(

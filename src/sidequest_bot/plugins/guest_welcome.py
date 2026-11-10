@@ -74,8 +74,9 @@ def build_guest_welcome_embed(member: discord.Member, recruiting: Recruiting | N
     ``recruiting`` adds a "We're looking for" field when officers have wanted roles/classes set.
     """
     description = (
-        f"Hey {member.display_name}, welcome! You're in as a guest, and a Quest Master will confirm you as a full "
-        f"guild member soon.\n\n"
+        f"Hey {member.display_name}, welcome! You're in as a guest for now. Link Battle.net with a character "
+        f"already in the guild and you're confirmed automatically; otherwise a Quest Master will confirm you soon."
+        f"\n\n"
         f"Head to {_choose_class_channel_mention(member.guild)} to pick a class role, and keep an eye on "
         f"{EVENTS_URL} for upcoming raids and events."
     )

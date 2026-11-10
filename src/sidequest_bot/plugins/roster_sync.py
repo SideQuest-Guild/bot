@@ -1,8 +1,10 @@
 """Periodic roster sync and level milestone feed.
 
 Keeps the website's character roster (``/api/guilds/{id}/characters/sync``) current with who's actually in the
-guild, refreshing a handful of stale Battle.net profiles each tick. A changed result is logged at info level so
-the sync is visible in the logs without spamming a channel.
+guild, refreshing a handful of stale Battle.net profiles each tick; the same call auto-confirms members who own a
+character on the in-game guild roster (``RosterSyncReport.members_confirmed``), which ``link_roles`` then reflects
+as the roster role next tick. A changed result is logged at info level so the sync is visible in the logs without
+spamming a channel.
 
 After each sync, posts any level 40/60 milestones the website hasn't sent to Discord yet
 (``/api/guilds/{id}/characters/milestones/pending``) to the guild's announcement channel
@@ -39,7 +41,13 @@ def build_milestone_embed(milestone: CharacterMilestone) -> discord.Embed:
 
 def describe_sync(report: RosterSyncReport) -> str | None:
     """One-line summary of what changed in ``report``, or ``None`` if nothing did (an unchanged member count)."""
-    if not (report.joined or report.left or report.profiles_refreshed or report.characters_linked):
+    if not (
+        report.joined
+        or report.left
+        or report.profiles_refreshed
+        or report.characters_linked
+        or report.members_confirmed
+    ):
         return None
     parts: list[str] = []
     if report.joined:
@@ -50,6 +58,8 @@ def describe_sync(report: RosterSyncReport) -> str | None:
         parts.append(f"{report.profiles_refreshed} profile(s) refreshed")
     if report.characters_linked:
         parts.append(f"{report.characters_linked} character(s) linked")
+    if report.members_confirmed:
+        parts.append(f"{report.members_confirmed} member(s) confirmed on the roster")
     return "; ".join(parts)
 
 

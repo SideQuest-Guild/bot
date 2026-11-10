@@ -68,6 +68,11 @@ def _fake_member(
     member.remove_roles = AsyncMock()
     member.send = AsyncMock()
     member.guild = SimpleNamespace(id=42, text_channels=[])
+    member.name = f"member{member_id}"
+    member.display_name = f"member{member_id}"
+    member.global_name = None
+    member.nick = None
+    member.avatar = None
     return member
 
 
@@ -104,37 +109,37 @@ def _make_interaction(*, guild_id: int = 1) -> Mock:
 class TestPlanRoleChanges:
     """Pure: only ever touches the configured role ids, never anything else."""
 
-    def test_adds_both_roles_for_new_fully_linked_member(self) -> None:
+    def test_adds_both_roles_for_new_fully_signed_in_member(self) -> None:
         to_add, to_remove = plan_role_changes(
-            set(), linked=True, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
+            set(), signed_in=True, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert sorted(to_add) == [1, 2]
         assert to_remove == []
 
     def test_adds_only_site_role_without_battlenet(self) -> None:
         to_add, to_remove = plan_role_changes(
-            set(), linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
+            set(), signed_in=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert to_add == [1]
         assert to_remove == []
 
     def test_removes_battlenet_role_on_unlink(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {1, 2}, linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
+            {1, 2}, signed_in=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert to_add == []
         assert to_remove == [2]
 
-    def test_removes_both_roles_when_no_longer_a_site_member(self) -> None:
+    def test_removes_both_roles_when_never_signed_in(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {1, 2}, linked=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
+            {1, 2}, signed_in=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert to_add == []
         assert sorted(to_remove) == [1, 2]
 
     def test_never_touches_other_roles(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {999}, linked=True, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
+            {999}, signed_in=True, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert sorted(to_add) == [1, 2]
         assert 999 not in to_add
@@ -142,50 +147,99 @@ class TestPlanRoleChanges:
 
     def test_none_role_ids_are_ignored(self) -> None:
         to_add, to_remove = plan_role_changes(
-            set(), linked=True, battlenet_linked=True, linked_role_id=None, battlenet_role_id=None, gate_role_id=None
+            set(),
+            signed_in=True,
+            battlenet_linked=True,
+            linked_role_id=None,
+            battlenet_role_id=None,
+            gate_role_id=None,
         )
         assert to_add == []
         assert to_remove == []
 
     def test_no_change_when_already_correct(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {1}, linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
+            {1}, signed_in=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
         )
         assert to_add == []
         assert to_remove == []
 
-    def test_adds_gate_role_for_unlinked_member(self) -> None:
+    def test_battlenet_role_requires_signed_in_even_if_linked(self) -> None:
+        """A Discord-only confirm never sets ``battlenet_linked``, but the AND is pure, so check it directly."""
         to_add, to_remove = plan_role_changes(
-            set(), linked=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
+            set(), signed_in=False, battlenet_linked=True, linked_role_id=1, battlenet_role_id=2, gate_role_id=None
+        )
+        assert to_add == []
+        assert to_remove == []
+
+    def test_adds_gate_role_for_unsigned_in_member(self) -> None:
+        to_add, to_remove = plan_role_changes(
+            set(), signed_in=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
         )
         assert 3 in to_add
         assert 3 not in to_remove
 
-    def test_removes_gate_role_once_linked(self) -> None:
+    def test_removes_gate_role_once_signed_in(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {3}, linked=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
+            {3}, signed_in=True, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
+        )
+        assert 3 not in to_add
+        assert 3 in to_remove
+
+    def test_removes_gate_role_once_roster_confirmed_even_without_signing_in(self) -> None:
+        """A Quest Master's Discord-only **Confirm in guild** drops the gate role without ``signed_in``."""
+        to_add, to_remove = plan_role_changes(
+            {3},
+            signed_in=False,
+            battlenet_linked=False,
+            linked_role_id=1,
+            battlenet_role_id=2,
+            gate_role_id=3,
+            roster_role_id=4,
+            roster_confirmed=True,
         )
         assert 3 not in to_add
         assert 3 in to_remove
 
     def test_gate_role_untouched_when_already_correct(self) -> None:
         to_add, to_remove = plan_role_changes(
-            {3}, linked=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
+            {3}, signed_in=False, battlenet_linked=False, linked_role_id=1, battlenet_role_id=2, gate_role_id=3
         )
         assert to_add == []
         assert to_remove == []
 
     def test_gate_role_none_is_ignored(self) -> None:
         to_add, to_remove = plan_role_changes(
-            set(), linked=False, battlenet_linked=False, linked_role_id=None, battlenet_role_id=None, gate_role_id=None
+            set(),
+            signed_in=False,
+            battlenet_linked=False,
+            linked_role_id=None,
+            battlenet_role_id=None,
+            gate_role_id=None,
         )
         assert to_add == []
         assert to_remove == []
 
-    def test_grants_roster_role_when_linked_and_confirmed(self) -> None:
+    def test_grants_roster_role_when_signed_in_and_confirmed(self) -> None:
         to_add, to_remove = plan_role_changes(
             set(),
-            linked=True,
+            signed_in=True,
+            battlenet_linked=False,
+            linked_role_id=1,
+            battlenet_role_id=2,
+            gate_role_id=None,
+            roster_role_id=3,
+            roster_confirmed=True,
+            ranked_above_roster_role=False,
+        )
+        assert 3 in to_add
+        assert 3 not in to_remove
+
+    def test_grants_roster_role_when_confirmed_without_ever_signing_in(self) -> None:
+        """**Confirm in guild**: a Discord-only member gets the roster role despite never having signed in."""
+        to_add, to_remove = plan_role_changes(
+            set(),
+            signed_in=False,
             battlenet_linked=False,
             linked_role_id=1,
             battlenet_role_id=2,
@@ -200,7 +254,7 @@ class TestPlanRoleChanges:
     def test_no_roster_role_when_not_confirmed(self) -> None:
         to_add, to_remove = plan_role_changes(
             set(),
-            linked=True,
+            signed_in=True,
             battlenet_linked=False,
             linked_role_id=1,
             battlenet_role_id=2,
@@ -215,7 +269,7 @@ class TestPlanRoleChanges:
     def test_no_re_grant_of_roster_role_when_ranked_above_it(self) -> None:
         to_add, to_remove = plan_role_changes(
             set(),
-            linked=True,
+            signed_in=True,
             battlenet_linked=False,
             linked_role_id=1,
             battlenet_role_id=2,
@@ -230,7 +284,7 @@ class TestPlanRoleChanges:
     def test_removes_roster_role_once_unconfirmed(self) -> None:
         to_add, to_remove = plan_role_changes(
             {3},
-            linked=True,
+            signed_in=True,
             battlenet_linked=False,
             linked_role_id=1,
             battlenet_role_id=2,
@@ -245,7 +299,7 @@ class TestPlanRoleChanges:
     def test_roster_role_none_is_ignored(self) -> None:
         to_add, to_remove = plan_role_changes(
             set(),
-            linked=True,
+            signed_in=True,
             battlenet_linked=False,
             linked_role_id=None,
             battlenet_role_id=None,
@@ -841,3 +895,161 @@ class TestProcessRoleResets:
         cog = _make_cog(api=api)
 
         await cog._process_role_resets(guild, _config(gate_role_id=None))
+
+
+class TestConfirmDiscordMember:
+    """LinkRolesCog.confirm_discord_member: Confirm in guild's API call, then an immediate role apply."""
+
+    async def test_confirms_and_applies_the_roster_role(self) -> None:
+        roster_role = _fake_role(300)
+        guild = _fake_guild(roles=[roster_role])
+        target = _fake_member(55, role_ids=[])
+        target.name = "pix"
+        target.global_name = "Pix"
+        target.nick = None
+        target.avatar = None
+        target.guild = guild
+        clicker = _fake_member(9001)
+        clicker.display_name = "Coffee"
+        link = MemberLink(discord_id=55, battlenet_linked=False, roster_confirmed=True, signed_in=False)
+        api = AsyncMock()
+        api.confirm_discord_member.return_value = link
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=None, battlenet_role_id=None, roster_role_id=300)
+        cog = _make_cog(api=api, configs=configs)
+        interaction = Mock()
+        interaction.followup.send = AsyncMock()
+
+        await cog.confirm_discord_member(interaction, target, clicker)
+
+        guild_id, discord_id, request = api.confirm_discord_member.await_args.args
+        assert (guild_id, discord_id) == (42, 55)
+        assert request.actor_discord_id == "9001"
+        assert request.actor_name == "Coffee"
+        assert request.profile.discord_id == 55
+        target.add_roles.assert_any_await(roster_role, reason="Confirmed on the guild roster")
+        interaction.followup.send.assert_awaited_once()
+        assert "confirmed" in interaction.followup.send.await_args.args[0].lower()
+
+    async def test_not_found_tells_the_clicker(self) -> None:
+        guild = _fake_guild()
+        target = _fake_member(55, role_ids=[])
+        target.guild = guild
+        clicker = _fake_member(9001)
+        api = AsyncMock()
+        api.confirm_discord_member.side_effect = NotFoundError(404, "no such guild")
+        cog = _make_cog(api=api)
+        interaction = Mock()
+        interaction.followup.send = AsyncMock()
+
+        await cog.confirm_discord_member(interaction, target, clicker)
+
+        interaction.followup.send.assert_awaited_once()
+        assert "isn't the site's guild" in interaction.followup.send.await_args.args[0]
+
+    async def test_forbidden_tells_the_clicker_they_arent_a_quest_master(self) -> None:
+        guild = _fake_guild()
+        target = _fake_member(55, role_ids=[])
+        target.guild = guild
+        clicker = _fake_member(9001)
+        api = AsyncMock()
+        api.confirm_discord_member.side_effect = APIError(403, "not a gm")
+        cog = _make_cog(api=api)
+        interaction = Mock()
+        interaction.followup.send = AsyncMock()
+
+        await cog.confirm_discord_member(interaction, target, clicker)
+
+        interaction.followup.send.assert_awaited_once()
+        assert "quest master" in interaction.followup.send.await_args.args[0].lower()
+
+    async def test_other_api_error_logged_and_reported(self, caplog: pytest.LogCaptureFixture) -> None:
+        guild = _fake_guild()
+        target = _fake_member(55, role_ids=[])
+        target.guild = guild
+        clicker = _fake_member(9001)
+        api = AsyncMock()
+        api.confirm_discord_member.side_effect = APIError(500, "boom")
+        cog = _make_cog(api=api)
+        interaction = Mock()
+        interaction.followup.send = AsyncMock()
+
+        with caplog.at_level(logging.WARNING):
+            await cog.confirm_discord_member(interaction, target, clicker)
+
+        interaction.followup.send.assert_awaited_once()
+        assert "try again" in interaction.followup.send.await_args.args[0].lower()
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+class TestConfirmInGuildContextMenu:
+    """The ``Confirm in guild`` context-menu command: client-side bot/self/GM checks before delegating."""
+
+    @staticmethod
+    def _interaction(*, clicker: Mock) -> Mock:
+        interaction = Mock()
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        interaction.user = clicker
+        return interaction
+
+    async def test_rejects_bots(self) -> None:
+        clicker = Mock(spec=discord.Member)
+        clicker.id = 1
+        target = Mock(spec=discord.Member)
+        target.id = 2
+        target.bot = True
+        interaction = self._interaction(clicker=clicker)
+
+        await link_roles_module.confirm_in_guild.callback(interaction, target)
+
+        interaction.followup.send.assert_awaited_once()
+        assert "pick another" in interaction.followup.send.await_args.args[0].lower()
+
+    async def test_rejects_self(self) -> None:
+        member = Mock(spec=discord.Member)
+        member.id = 1
+        member.bot = False
+        interaction = self._interaction(clicker=member)
+
+        await link_roles_module.confirm_in_guild.callback(interaction, member)
+
+        interaction.followup.send.assert_awaited_once()
+        assert "pick another" in interaction.followup.send.await_args.args[0].lower()
+
+    async def test_rejects_a_non_gm_clicker(self) -> None:
+        clicker = Mock(spec=discord.Member)
+        clicker.id = 1
+        clicker.bot = False
+        clicker.roles = []
+        target = Mock(spec=discord.Member)
+        target.id = 2
+        target.bot = False
+        interaction = self._interaction(clicker=clicker)
+        settings = SimpleNamespace(GM_ROLE_IDS=[999])
+
+        with patch.object(link_roles_module, "_web_settings", return_value=settings):
+            await link_roles_module.confirm_in_guild.callback(interaction, target)
+
+        interaction.followup.send.assert_awaited_once()
+        assert "quest master" in interaction.followup.send.await_args.args[0].lower()
+
+    async def test_gm_clicker_delegates_to_the_cog(self) -> None:
+        gm_role_id = 10
+        clicker = Mock(spec=discord.Member)
+        clicker.id = 1
+        clicker.bot = False
+        clicker.roles = [SimpleNamespace(id=gm_role_id)]
+        target = Mock(spec=discord.Member)
+        target.id = 2
+        target.bot = False
+        interaction = self._interaction(clicker=clicker)
+        cog = LinkRolesCog.__new__(LinkRolesCog)
+        cog.confirm_discord_member = AsyncMock()
+        interaction.client.get_cog.return_value = cog
+        settings = SimpleNamespace(GM_ROLE_IDS=[gm_role_id])
+
+        with patch.object(link_roles_module, "_web_settings", return_value=settings):
+            await link_roles_module.confirm_in_guild.callback(interaction, target)
+
+        cog.confirm_discord_member.assert_awaited_once_with(interaction, target, clicker)

@@ -1,19 +1,26 @@
 """Site sign-in, Battle.net link, and roster-confirmation roles, the gate role, plus the ``/linkroles`` admin group.
 
-Every 60 s: for each guild with any of the four roles configured, pull who has signed in, who has also linked
-Battle.net, and who an officer has confirmed on the in-game guild roster from the API, and reconcile every member's
-roles against that. The gate role (**At the Gate**) is wanted exactly while a member has NOT signed in: new members
-get it on join so they only see the sign-in channel, and it's removed the moment they sign in. The roster role
-(**New Arrival**) is wanted once an officer confirms the member, but is never re-granted to a member who already
-holds a higher rank. ``on_member_join``/screening-clear apply the same plan immediately so a new member doesn't
-wait up to a minute for their role. The same loop also applies every pending Discord role reset
+Every 60 s: for each guild with any of the four roles configured, pull every known member's sign-in, Battle.net
+link, and roster-confirmation state from the API, and reconcile every member's roles against that. The site role
+(**Signed the Ledger**) is wanted exactly while a member has signed in; the Battle.net role (**Battle-Tagged**)
+additionally requires having linked Battle.net (so unlinking Battle.net drops just that role, and unlinking/never
+having a site account drops both). The roster role (**New Arrival**) is wanted once the member is confirmed on the
+in-game guild roster — by an officer, a Discord-only **Confirm in guild**, or automatically because one of their
+Battle.net characters is in the guild roster — regardless of whether they've ever signed in, but is never re-granted
+to a member who already holds a higher rank. The gate role (**At the Gate**) is wanted exactly while a member is
+NEITHER signed in NOR roster-confirmed: new members get it on join so they only see the sign-in channel, and it's
+removed the moment either condition is met. ``on_member_join``/screening-clear apply the same plan immediately so a
+new member doesn't wait up to a minute for their role. The same loop also applies every pending Discord role reset
 (``GET .../role-resets``): a member who deleted their site account gets every role the bot can manage stripped and
 the gate role (re)granted immediately, landing them back behind #sign-the-ledger. The moment a member is granted
 the site link role, they're DMed a one-time welcome (``guest_welcome.send_guest_welcome_dm``). The bot is the only
-thing that talks to Discord about these roles; the API only reports who is linked/confirmed/pending a reset.
+thing that talks to Discord about these roles; the API only reports who is signed in/linked/confirmed/pending a
+reset.
 """
 
 import logging
+from functools import lru_cache
+from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 import discord
@@ -24,8 +31,11 @@ from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.roles import grant_block_reason
 from sidequest_bot.plugins.guest_welcome import send_guest_welcome_dm
+from sidequest_bot.plugins.member_profiles import build_member_profile
+from sidequest_bot.plugins.signup_notices import clicker_is_gm
 from sidequest_bot.plugins.welcome import autorole_block_reason, completed_screening
-from sidequest_common.schemas import GuildConfigUpdate
+from sidequest_common.schemas import DiscordRosterConfirmRequest, GuildConfigUpdate
+from sidequest_common.settings import WebSettings
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -35,6 +45,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 60
+
+
+@lru_cache(maxsize=1)
+def _web_settings() -> WebSettings:
+    """``WebSettings`` (``WEB_*`` env vars), shared with the API: just ``GM_ROLE_IDS`` here."""
+    return WebSettings()
 
 
 def _plan_role(
@@ -59,7 +75,7 @@ def _plan_role(
 def plan_role_changes(
     member_role_ids: set[int],
     *,
-    linked: bool,
+    signed_in: bool,
     battlenet_linked: bool,
     linked_role_id: int | None,
     battlenet_role_id: int | None,
@@ -71,24 +87,25 @@ def plan_role_changes(
     """Which of the four configured roles to add/remove for one member.
 
     Only ever touches ``linked_role_id``/``battlenet_role_id``/``gate_role_id``/``roster_role_id`` (a ``None`` id
-    is skipped entirely): the site role tracks ``linked``, the Battle.net role additionally requires
-    ``battlenet_linked`` (so unlinking Battle.net drops just that role, and unlinking the site account drops both),
-    the gate role is wanted exactly when the member is NOT linked (added once they join unlinked, removed once
-    they sign in), and the roster role is wanted once an officer confirms the member on the in-game guild roster
-    but is never (re-)granted to a member who ``ranked_above_roster_role`` already holds a higher rank (a promoted
-    member who dropped the role must not get it back every minute).
+    is skipped entirely): the site role tracks ``signed_in``, the Battle.net role additionally requires
+    ``battlenet_linked`` (so unlinking Battle.net drops just that role, and never having signed in drops both),
+    the roster role is wanted once the member is ``roster_confirmed`` — by an officer, a Discord-only confirm, or
+    automatically from the Battle.net guild roster — regardless of ``signed_in``, but is never (re-)granted to a
+    member who ``ranked_above_roster_role`` already holds a higher rank (a promoted member who dropped the role
+    must not get it back every minute), and the gate role is wanted exactly when the member is NEITHER
+    ``signed_in`` NOR ``roster_confirmed`` (added once they join with neither, removed the moment either is true).
     """
     to_add: list[int] = []
     to_remove: list[int] = []
-    _plan_role(linked_role_id, member_role_ids, to_add, to_remove, wants_role=linked)
-    _plan_role(battlenet_role_id, member_role_ids, to_add, to_remove, wants_role=linked and battlenet_linked)
-    _plan_role(gate_role_id, member_role_ids, to_add, to_remove, wants_role=not linked)
+    _plan_role(linked_role_id, member_role_ids, to_add, to_remove, wants_role=signed_in)
+    _plan_role(battlenet_role_id, member_role_ids, to_add, to_remove, wants_role=signed_in and battlenet_linked)
+    _plan_role(gate_role_id, member_role_ids, to_add, to_remove, wants_role=not signed_in and not roster_confirmed)
     _plan_role(
         roster_role_id,
         member_role_ids,
         to_add,
         to_remove,
-        wants_role=linked and roster_confirmed,
+        wants_role=roster_confirmed,
         blocked=ranked_above_roster_role,
     )
     return to_add, to_remove
@@ -184,13 +201,13 @@ class LinkRolesCog(commands.Cog):
         links_by_discord_id: dict[int, MemberLink],
     ) -> None:
         link = links_by_discord_id.get(member.id)
-        linked = link is not None
+        signed_in = link.signed_in if link is not None else False
         battlenet_linked = link.battlenet_linked if link is not None else False
         roster_confirmed = link.roster_confirmed if link is not None else False
         member_role_ids = {role.id for role in member.roles}
         to_add, to_remove = plan_role_changes(
             member_role_ids,
-            linked=linked,
+            signed_in=signed_in,
             battlenet_linked=battlenet_linked,
             linked_role_id=config.linked_role_id,
             battlenet_role_id=config.battlenet_role_id,
@@ -413,7 +430,60 @@ class LinkRolesCog(commands.Cog):
         message = f"Confirmed guild members will get {role.mention}." if role else "Roster role disabled."
         await interaction.response.send_message(message, ephemeral=True)
 
+    # --- Confirm in guild (Discord-only confirm) -----------------------------------------------------------
+
+    async def confirm_discord_member(
+        self, interaction: discord.Interaction[SideQuestBot], target: discord.Member, clicker: discord.Member
+    ) -> None:
+        """Confirm ``target`` on the roster from Discord, creating their ``Member`` row if they have none.
+
+        Builds ``profile`` the same way ``member_profiles``'s push does, then applies the resulting roster role
+        right away rather than waiting for the next sync tick.
+        """
+        guild = target.guild
+        request = DiscordRosterConfirmRequest(
+            actor_discord_id=str(clicker.id), actor_name=clicker.display_name, profile=build_member_profile(target)
+        )
+        try:
+            link = await self.bot.api.confirm_discord_member(guild.id, target.id, request)
+        except NotFoundError:
+            await interaction.followup.send("This isn't the site's guild.", ephemeral=True)
+            return
+        except APIError as exc:
+            if exc.status_code == HTTPStatus.FORBIDDEN:
+                await interaction.followup.send("Only Quest Masters can confirm members.", ephemeral=True)
+                return
+            logger.warning("Failed to confirm %s on the roster via Discord", target.id, exc_info=True)
+            await interaction.followup.send("Couldn't reach the guild records; try again shortly.", ephemeral=True)
+            return
+        config = await self.bot.configs.get(guild.id)
+        await self._apply_member(guild, target, config, {target.id: link})
+        await interaction.followup.send(f"{target.mention} is confirmed on the roster.", ephemeral=True)
+
+
+@app_commands.context_menu(name="Confirm in guild")
+@app_commands.guild_only()
+async def confirm_in_guild(interaction: discord.Interaction[SideQuestBot], member: discord.Member) -> None:
+    """User context-menu command: a Quest Master confirms ``member`` on the roster without their ever signing in.
+
+    Checked twice: here against the clicker's live Discord roles (``WEB_GM_ROLE_IDS``), and again by the API
+    against its own record of the clicker's roles, the same defense-in-depth as the signup notice Approve button.
+    """
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    clicker = interaction.user
+    if member.bot or member.id == clicker.id or not isinstance(clicker, discord.Member):
+        await interaction.followup.send("Pick another member.", ephemeral=True)
+        return
+    if not clicker_is_gm({role.id for role in clicker.roles}, _web_settings().GM_ROLE_IDS):
+        await interaction.followup.send("Only Quest Masters can confirm members.", ephemeral=True)
+        return
+    cog = interaction.client.get_cog("LinkRolesCog")
+    if not isinstance(cog, LinkRolesCog):
+        return
+    await cog.confirm_discord_member(interaction, member, clicker)
+
 
 async def setup(bot: SideQuestBot) -> None:
-    """Register the cog."""
+    """Register the cog and the Confirm in guild context-menu command."""
+    bot.tree.add_command(confirm_in_guild)
     await bot.add_cog(LinkRolesCog(bot))

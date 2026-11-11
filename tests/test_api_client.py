@@ -561,7 +561,10 @@ async def test_get_character_parses_page_with_sheet(api: SideQuestAPI) -> None:
             "gear": [
                 {"slot_name": "Head", "name": "Lionheart Helm", "item_level": 65},
                 {"slot_name": "Chest", "name": "Breastplate of Valor", "item_level": 60},
-            ]
+            ],
+            "hunter_pets": [
+                {"name": "Boar", "level": 19, "creature": "Great Goretusk", "creature_id": 1234, "active": True}
+            ],
         },
     }
     route = respx.get(f"{BASE}/api/characters/nox-zul").mock(return_value=httpx.Response(200, json=data))
@@ -570,6 +573,21 @@ async def test_get_character_parses_page_with_sheet(api: SideQuestAPI) -> None:
     assert character.sheet is not None
     assert len(character.sheet.gear) == 2
     assert character.sheet.gear[0].name == "Lionheart Helm"
+    assert len(character.sheet.hunter_pets) == 1
+    pet = character.sheet.hunter_pets[0]
+    assert pet.name == "Boar"
+    assert pet.creature == "Great Goretusk"
+    assert pet.active is True
+
+
+@respx.mock
+async def test_get_character_sheet_defaults_empty_hunter_pets_when_omitted(api: SideQuestAPI) -> None:
+    """A site that hasn't deployed ``hunter_pets`` yet (rolling deploy) omits it; the bot defaults to empty."""
+    data = {**_CHARACTER_SUMMARY_JSON, "sheet": {"gear": []}}
+    respx.get(f"{BASE}/api/characters/nox-zul").mock(return_value=httpx.Response(200, json=data))
+    character = await api.get_character("nox-zul")
+    assert character.sheet is not None
+    assert character.sheet.hunter_pets == []
 
 
 @respx.mock

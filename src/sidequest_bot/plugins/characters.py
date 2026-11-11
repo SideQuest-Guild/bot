@@ -20,7 +20,7 @@ from sidequest_bot.lib.embeds import Colors, make_embed, truncate
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sidequest_bot.api_client import CharacterGearItem
+    from sidequest_bot.api_client import CharacterGearItem, CharacterHunterPet
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ SLUG_PATTERN = re.compile(r"^[^\s/?#-]+-[^\s/?#-]+$")
 SEARCH_MIN_LENGTH = 2
 MAX_AUTOCOMPLETE_RESULTS = 25
 MAX_GEAR_FIELD_ITEMS = 8
+MAX_PETS_FIELD_ITEMS = 10
 NAME_HINT = "Give a name and surname, like Nox Zul"
 UNAVAILABLE_MESSAGE = "Battle.net did not answer; try again in a minute."
 NO_PROFILE_MESSAGE = "Battle.net hasn't published this character's profile yet."
@@ -121,6 +122,17 @@ def build_gear_field(gear: Sequence[CharacterGearItem]) -> str:
     return truncate("\n".join(gear_line(item) for item in ranked))
 
 
+def hunter_pet_line(pet: CharacterHunterPet) -> str:
+    """One pet line: ``Name (Creature) Level``, with `` · active`` for the hunter's current pet."""
+    suffix = " · active" if pet.active else ""
+    return f"{pet.name} ({pet.creature}) {pet.level}{suffix}"
+
+
+def build_pets_field(hunter_pets: Sequence[CharacterHunterPet]) -> str:
+    """Up to :data:`MAX_PETS_FIELD_ITEMS` pets, active first, in the order Battle.net reported them."""
+    return truncate("\n".join(hunter_pet_line(pet) for pet in hunter_pets[:MAX_PETS_FIELD_ITEMS]))
+
+
 def build_description(character: CharacterSummary) -> str:
     """``Level N Race Class · Spec``, degrading gracefully when a part is missing or no profile exists yet."""
     if not character.profile_found:
@@ -147,6 +159,8 @@ def build_character_embed(character: CharacterPage) -> discord.Embed:
         embed.add_field(name="PvP", value=pvp_value(character), inline=False)
     if character.sheet is not None and character.sheet.gear:
         embed.add_field(name="Gear", value=build_gear_field(character.sheet.gear), inline=False)
+    if character.sheet is not None and character.sheet.hunter_pets:
+        embed.add_field(name="Pets", value=build_pets_field(character.sheet.hunter_pets), inline=False)
     embed.add_field(name="Armory", value=f"[View on Armory]({ARMORY_URL.format(slug=character.slug)})", inline=False)
     return embed
 

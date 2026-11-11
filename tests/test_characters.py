@@ -8,6 +8,7 @@ import discord
 from sidequest_bot.api_client import (
     APIError,
     CharacterGearItem,
+    CharacterHunterPet,
     CharacterPage,
     CharacterSheet,
     CharacterSummary,
@@ -22,10 +23,12 @@ from sidequest_bot.plugins.characters import (
     build_character_embed,
     build_description,
     build_gear_field,
+    build_pets_field,
     character_choice,
     class_color,
     gear_line,
     guild_value,
+    hunter_pet_line,
     pvp_value,
     resolve_slug,
 )
@@ -60,6 +63,17 @@ def _summary(**overrides: object) -> CharacterSummary:
 
 def _gear(*, slot_name: str = "Head", name: str = "Lionheart Helm", item_level: int | None = 65) -> CharacterGearItem:
     return CharacterGearItem(slot_name=slot_name, name=name, item_level=item_level)
+
+
+def _pet(
+    *,
+    name: str = "Boar",
+    level: int = 19,
+    creature: str = "Great Goretusk",
+    creature_id: int = 1234,
+    active: bool = False,
+) -> CharacterHunterPet:
+    return CharacterHunterPet(name=name, level=level, creature=creature, creature_id=creature_id, active=active)
 
 
 def _page(**overrides: object) -> CharacterPage:
@@ -176,6 +190,19 @@ class TestGearField:
         assert lines[-1] == "Slot2: Item2 (2)"
 
 
+class TestPetsField:
+    def test_hunter_pet_line_active(self) -> None:
+        assert hunter_pet_line(_pet(active=True)) == "Boar (Great Goretusk) 19 · active"
+
+    def test_hunter_pet_line_inactive(self) -> None:
+        assert hunter_pet_line(_pet(active=False)) == "Boar (Great Goretusk) 19"
+
+    def test_caps_at_ten(self) -> None:
+        pets = [_pet(name=f"Pet{i}", creature=f"Creature{i}", level=i) for i in range(12)]
+        field = build_pets_field(pets)
+        assert len(field.splitlines()) == 10
+
+
 class TestBuildCharacterEmbed:
     def test_title_url_and_color(self) -> None:
         embed = build_character_embed(_page())
@@ -211,6 +238,17 @@ class TestBuildCharacterEmbed:
         character = _page(sheet=CharacterSheet(gear=[_gear()]))
         embed = build_character_embed(character)
         assert "Gear" in [field.name for field in embed.fields]
+
+    def test_no_pets_field_when_sheet_has_no_hunter_pets(self) -> None:
+        character = _page(sheet=CharacterSheet(gear=[_gear()]))
+        embed = build_character_embed(character)
+        assert "Pets" not in [field.name for field in embed.fields]
+
+    def test_pets_field_present_when_sheet_has_hunter_pets(self) -> None:
+        character = _page(sheet=CharacterSheet(gear=[], hunter_pets=[_pet(active=True)]))
+        embed = build_character_embed(character)
+        field_names = {field.name: field.value for field in embed.fields}
+        assert field_names["Pets"] == "Boar (Great Goretusk) 19 · active"
 
 
 class TestAutocomplete:

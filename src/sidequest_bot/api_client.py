@@ -168,10 +168,28 @@ class CharacterGearItem(BaseModel):
     item_level: int | None
 
 
+class CharacterHunterPet(BaseModel):
+    """One of a hunter's tamed pets, as shown in ``/who``'s Pets field.
+
+    Mirrors the website's ``CharacterHunterPet`` by hand: phase 4's character schemas aren't in the
+    ``sidequest-common`` pin yet. ``creature`` is the tamed beast's species name (e.g. "Great Goretusk").
+    """
+
+    name: str
+    level: int
+    creature: str
+    creature_id: int
+    active: bool = False
+
+
 class CharacterSheet(BaseModel):
-    """The subset of the website's ``CharacterSheet`` this bot shows: just the gear list."""
+    """The subset of the website's ``CharacterSheet`` this bot shows: the gear list and any hunter pets.
+
+    ``hunter_pets`` defaults empty so the bot works against a site that hasn't deployed it yet.
+    """
 
     gear: list[CharacterGearItem]
+    hunter_pets: list[CharacterHunterPet] = Field(default_factory=list)
 
 
 class CharacterSummary(BaseModel):

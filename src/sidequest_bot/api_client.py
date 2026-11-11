@@ -60,6 +60,7 @@ from sidequest_common.schemas import (
     PendingAnnouncement,
     PendingAnnouncementsPage,
     RankSchema,
+    RecipeDetail,
     Recruiting,
     RoleMenuCreate,
     RoleMenuOptionUpsert,
@@ -1012,6 +1013,17 @@ class SideQuestAPI:
         """
         data = await self._request("GET", f"/api/achievements/{achievement_id}")
         return _parse(AchievementSchema.model_validate, data)
+
+    # --- Recipes
+
+    async def get_recipe(self, recipe_id: int) -> RecipeDetail:
+        """One recipe by its Battle.net game ID: what it makes, its reagents, and guild crafters.
+
+        The public ``/api/recipes/{id}`` GET. Raises ``NotFoundError`` for an unknown recipe, or ``APIError``
+        (status 503) if Battle.net isn't configured or didn't answer.
+        """
+        data = await self._request("GET", f"/api/recipes/{recipe_id}")
+        return _parse(RecipeDetail.model_validate, data)
 
     # --- Auctions
 

@@ -11,6 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from tenacity import AsyncRetrying, before_sleep_log, retry_if_exception, stop_after_attempt, wait_exponential
 
 from sidequest_common.schemas import (
+    AchievementCategorySchema,
+    AchievementCategoryTree,
+    AchievementSchema,
     ActivityAck,
     AddonSchema,
     AnnouncementPosted,
@@ -57,6 +60,7 @@ from sidequest_common.schemas import (
     PendingAnnouncement,
     PendingAnnouncementsPage,
     RankSchema,
+    RecipeDetail,
     Recruiting,
     RoleMenuCreate,
     RoleMenuOptionUpsert,
@@ -96,6 +100,7 @@ _WEEKLY_BOARD_EVENTS = TypeAdapter(list[WeeklyBoardEvent])
 _GROUP_SESSIONS = TypeAdapter(list[GroupSessionSchema])
 _XP_GRANTS = TypeAdapter(list[XPGrantResult])
 _ADDONS = TypeAdapter(list[AddonSchema])
+_ACHIEVEMENT_CATEGORIES = TypeAdapter(list[AchievementCategoryTree])
 
 
 class ItemSummary(BaseModel):
@@ -980,6 +985,45 @@ class SideQuestAPI:
         """
         data = await self._request("GET", f"/api/items/{item_id}")
         return _parse(Item.model_validate, data)
+
+    # --- Achievements
+
+    async def list_achievement_categories(self) -> list[AchievementCategoryTree]:
+        """Every root achievement category with its subcategories (the public ``/api/achievements/categories`` GET).
+
+        503 if Battle.net isn't configured or didn't answer.
+        """
+        data = await self._request("GET", "/api/achievements/categories")
+        return _parse(_ACHIEVEMENT_CATEGORIES.validate_python, data)
+
+    async def get_achievement_category(self, category_id: int) -> AchievementCategorySchema:
+        """One achievement category and its achievements (the public ``/api/achievements/categories/{id}`` GET).
+
+        Raises ``NotFoundError`` for an unknown category, or ``APIError`` (status 503) if Battle.net isn't
+        configured or didn't answer.
+        """
+        data = await self._request("GET", f"/api/achievements/categories/{category_id}")
+        return _parse(AchievementCategorySchema.model_validate, data)
+
+    async def get_achievement(self, achievement_id: int) -> AchievementSchema:
+        """One achievement by its game ID (the public ``/api/achievements/{id}`` GET).
+
+        Raises ``NotFoundError`` for an unknown achievement, or ``APIError`` (status 503) if Battle.net isn't
+        configured or didn't answer.
+        """
+        data = await self._request("GET", f"/api/achievements/{achievement_id}")
+        return _parse(AchievementSchema.model_validate, data)
+
+    # --- Recipes
+
+    async def get_recipe(self, recipe_id: int) -> RecipeDetail:
+        """One recipe by its Battle.net game ID: what it makes, its reagents, and guild crafters.
+
+        The public ``/api/recipes/{id}`` GET. Raises ``NotFoundError`` for an unknown recipe, or ``APIError``
+        (status 503) if Battle.net isn't configured or didn't answer.
+        """
+        data = await self._request("GET", f"/api/recipes/{recipe_id}")
+        return _parse(RecipeDetail.model_validate, data)
 
     # --- Auctions
 

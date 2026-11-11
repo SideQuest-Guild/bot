@@ -666,3 +666,49 @@ async def test_mark_milestone_posted_raises_not_found_for_unknown_milestone(api:
     respx.post(url).mock(return_value=httpx.Response(404, json={"detail": "not found"}))
     with pytest.raises(NotFoundError):
         await api.mark_milestone_posted(1, UUID(_MILESTONE_ID), None)
+
+
+CRAFTERS_URL = f"{BASE}/api/guilds/1/crafters"
+_CRAFTERS_JSON = {
+    "results": [
+        {
+            "recipe_id": 1,
+            "recipe_name": "Flask of Supreme Power",
+            "item_id": 13512,
+            "battlenet_recipe_id": None,
+            "crafters": [
+                {"character": "nox-zul", "member_id": 1, "member_name": "Nox", "profession": "Alchemy", "skill": 300}
+            ],
+        }
+    ],
+    "professions": [{"profession": "Alchemy", "crafters": 1}],
+}
+
+
+@respx.mock
+async def test_get_crafters_parses_results_and_professions(api: SideQuestAPI) -> None:
+    route = respx.get(CRAFTERS_URL).mock(return_value=httpx.Response(200, json=_CRAFTERS_JSON))
+    crafters = await api.get_crafters(1, q="flask", profession="Alchemy")
+    assert route.call_count == 1
+    assert route.calls.last.request.url.params["q"] == "flask"
+    assert route.calls.last.request.url.params["profession"] == "Alchemy"
+    assert len(crafters.results) == 1
+    assert crafters.results[0].recipe_name == "Flask of Supreme Power"
+    assert crafters.results[0].crafters[0].character == "nox-zul"
+    assert crafters.professions[0].profession == "Alchemy"
+
+
+@respx.mock
+async def test_get_crafters_omits_params_when_not_given(api: SideQuestAPI) -> None:
+    route = respx.get(CRAFTERS_URL).mock(return_value=httpx.Response(200, json=_CRAFTERS_JSON))
+    await api.get_crafters(1)
+    assert route.call_count == 1
+    assert "q" not in route.calls.last.request.url.params
+    assert "profession" not in route.calls.last.request.url.params
+
+
+@respx.mock
+async def test_get_crafters_raises_not_found_for_non_site_guild_or_undeployed_route(api: SideQuestAPI) -> None:
+    respx.get(CRAFTERS_URL).mock(return_value=httpx.Response(404, json={"detail": "not found"}))
+    with pytest.raises(NotFoundError):
+        await api.get_crafters(1, q="flask")

@@ -90,7 +90,10 @@ lives there.
   <name>` looks up a WoW: Forever item and shows its tooltip, icon and sell price; search a whole word (`bless`,
   `thunderfury`), not a partial one. Pasting a link to an item's page on the site shows the same tooltip in chat.
   `/who <character>` looks up a roster or previously looked-up character's level, guild, gear and PvP stats from
-  Battle.net, with autocomplete over the roster and past lookups.
+  Battle.net, with autocomplete over the roster and past lookups; a hunter's tamed pets show too.
+- **Crafters.** `/crafter <query> [profession]` finds guild characters who know a recipe matching `query`, with
+  their profession, skill and the matching recipes, including characters synced from Battle.net who never ran the
+  addon; `profession` autocompletes from the guild's known professions.
 - **Auction prices.** `/price <item>` shows an item's lowest current auction price, where it's cheapest, how many
   are listed, and its 14-day price range. `/watch <item> <price>` (e.g. `1g20s`, `35s`, `80c`) DMs you when that
   item's price drops to or below your target; `/unwatch <item>` removes a watch and `/watches` lists yours. Watches

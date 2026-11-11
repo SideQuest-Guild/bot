@@ -38,6 +38,7 @@ from sidequest_common.schemas import (
     GroupTranscriptPurge,
     GuildConfigSchema,
     GuildConfigUpdate,
+    GuildCrafters,
     GuildRoleIn,
     GuildRolesReplace,
     LeaderboardPage,
@@ -863,6 +864,22 @@ class SideQuestAPI:
         """
         data = await self._request("POST", f"{self._guild(guild_id)}/characters/sync")
         return _parse(RosterSyncReport.model_validate, data)
+
+    async def get_crafters(
+        self, guild_id: int, *, q: str | None = None, profession: str | None = None
+    ) -> GuildCrafters:
+        """Characters that know a recipe matching ``q`` (recipe or profession substring) / ``profession``.
+
+        Same semantics as the member route (``GET /api/guild/crafters``), but keyed by ``guild_id`` for the bot.
+        Raises ``NotFoundError`` for a non-site ``guild_id``, or if the site hasn't deployed this route yet.
+        """
+        params: dict[str, Any] = {}
+        if q is not None:
+            params["q"] = q
+        if profession is not None:
+            params["profession"] = profession
+        data = await self._request("GET", f"{self._guild(guild_id)}/crafters", params=params)
+        return _parse(GuildCrafters.model_validate, data)
 
     # --- Character milestones
 

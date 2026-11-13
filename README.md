@@ -97,11 +97,14 @@ lives there.
 - **Crafters.** `/crafter <query> [profession]` finds guild characters who know a recipe matching `query`, with
   their profession, skill and the matching recipes, including characters synced from Battle.net who never ran the
   addon; `profession` autocompletes from the guild's known professions.
-- **Achievements and recipes.** `/achievement <name>` looks up a WoW: Forever achievement and shows its points,
-  description and category, with autocomplete over the full catalog. `/recipe <name>` looks up a recipe (reusing
-  `/crafter`'s search) and shows its reagents, crafted item and the guild crafters who know it. `/compare
-  <character1> <character2>` is `/who` for two characters side by side: level, class, item level with the lead
-  highlighted, PvP stats, and a per-slot gear comparison table; autocompletes the same way `/who` does.
+- **Achievements, quests and recipes.** `/achievement <name>` looks up a WoW: Forever achievement and shows its
+  points, description and category, with autocomplete over the full catalog. `/quest <name>` looks up a quest and
+  shows its area, category, level range, rewards, and its place in its chain (earlier quests, the quest itself in
+  bold, and what it leads to), plus any requirements and quests it excludes; autocompletes as you type. `/recipe
+  <name>` looks up a recipe (reusing `/crafter`'s search) and shows its reagents, crafted item and the guild
+  crafters who know it. `/compare <character1> <character2>` is `/who` for two characters side by side: level,
+  class, item level with the lead highlighted, PvP stats, and a per-slot gear comparison table; autocompletes the
+  same way `/who` does.
 - **Auction prices.** `/price <item>` shows an item's lowest current auction price, where it's cheapest, how many
   are listed, and its 14-day price range. `/watch <item> <price>` (e.g. `1g20s`, `35s`, `80c`) DMs you when that
   item's price drops to or below your target; `/unwatch <item>` removes a watch and `/watches` lists yours. Watches

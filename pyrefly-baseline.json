@@ -170,6 +170,13 @@
     },
     {
       "column": 15,
+      "path": "src/sidequest_bot/plugins/quests.py",
+      "name": "bad-override",
+      "concise_description": "Class member `_QuestMatchSelect.callback` overrides parent class `Select` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
       "path": "src/sidequest_bot/plugins/role_menus.py",
       "name": "bad-override",
       "concise_description": "Class member `RoleMenuButton.callback` overrides parent class `DynamicItem` in an inconsistent manner",

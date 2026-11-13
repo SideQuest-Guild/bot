@@ -13,6 +13,8 @@ from sidequest_bot.plugins.items import (
     ItemsCog,
     build_item_embed,
     format_sell_price,
+    item_link_buttons,
+    item_link_view,
     item_quality_color,
 )
 
@@ -115,17 +117,29 @@ class TestBuildItemEmbed:
         assert "Unique" in embed.description
         assert "Sells for 12g 34s 56c." in embed.description
 
-    def test_links_field_has_site_and_wowhead(self) -> None:
-        embed = build_item_embed(_item(item_id=19019))
-        assert len(embed.fields) == 1
-        value = embed.fields[0].value
-        assert value is not None
-        assert "https://sidequest-guild.com/items/detail/?id=19019" in value
-        assert "https://www.wowhead.com/forever/item=19019" in value
+    def test_has_no_fields(self) -> None:
+        embed = build_item_embed(_item())
+        assert embed.fields == []
 
     def test_no_icon_leaves_thumbnail_unset(self) -> None:
         embed = build_item_embed(_item(icon_url=None))
         assert embed.thumbnail.url is None
+
+
+class TestItemLinkButtons:
+    def test_item_page_and_wowhead_buttons(self) -> None:
+        item_page, wowhead = item_link_buttons(19019)
+        assert item_page.label == "Item page"
+        assert item_page.url == "https://sidequest-guild.com/items/detail/?id=19019"
+        assert wowhead.label == "Wowhead"
+        assert wowhead.url == "https://www.wowhead.com/forever/item=19019"
+
+
+class TestItemLinkView:
+    def test_holds_both_link_buttons(self) -> None:
+        view = item_link_view(19019)
+        labels = [button.label for button in view.children]
+        assert labels == ["Item page", "Wowhead"]
 
 
 class TestItemCommand:
@@ -142,7 +156,7 @@ class TestItemCommand:
         assert NOT_FOUND_HINT in message[0]
         assert kwargs["ephemeral"] is True
 
-    async def test_single_result_sends_embed_without_select(self) -> None:
+    async def test_single_result_sends_link_buttons_without_select(self) -> None:
         api = AsyncMock()
         api.search_items.return_value = SimpleNamespace(results=[_summary(item_id=19019, name="Thunderfury")])
         api.get_item.return_value = _item(item_id=19019, name="Thunderfury")
@@ -154,7 +168,8 @@ class TestItemCommand:
         interaction.followup.send.assert_awaited_once()
         kwargs = interaction.followup.send.await_args.kwargs
         assert kwargs["embed"].title == "Thunderfury"
-        assert "view" not in kwargs
+        labels = [button.label for button in kwargs["view"].children]
+        assert labels == ["Item page", "Wowhead"]
 
     async def test_multiple_results_offers_select_of_others(self) -> None:
         api = AsyncMock()
@@ -206,14 +221,19 @@ class TestItemCommand:
 
 class TestItemMatchView:
     def test_options_use_match_names_and_ids(self) -> None:
-        view = ItemMatchView([_summary(item_id=1, name="Sword of A"), _summary(item_id=2, name="Sword of B")])
+        view = ItemMatchView(1, [_summary(item_id=1, name="Sword of A"), _summary(item_id=2, name="Sword of B")])
         assert [o.label for o in view._select.options] == ["Sword of A", "Sword of B"]
         assert [o.value for o in view._select.options] == ["1", "2"]
+
+    def test_link_buttons_point_at_initial_item(self) -> None:
+        view = ItemMatchView(1, [_summary(item_id=2, name="Sword of B")])
+        assert view._item_page_button.url == "https://sidequest-guild.com/items/detail/?id=1"
+        assert view._wowhead_button.url == "https://www.wowhead.com/forever/item=1"
 
     async def test_select_callback_edits_message_with_chosen_item(self) -> None:
         api = AsyncMock()
         api.get_item.return_value = _item(item_id=2, name="Sword of B")
-        view = ItemMatchView([_summary(item_id=2, name="Sword of B")])
+        view = ItemMatchView(1, [_summary(item_id=2, name="Sword of B")])
         view._select._values = ["2"]
         interaction = _make_interaction(api)
 
@@ -223,11 +243,13 @@ class TestItemMatchView:
         kwargs = interaction.response.edit_message.await_args.kwargs
         assert kwargs["embed"].title == "Sword of B"
         assert kwargs["view"] is view
+        assert view._item_page_button.url == "https://sidequest-guild.com/items/detail/?id=2"
+        assert view._wowhead_button.url == "https://www.wowhead.com/forever/item=2"
 
     async def test_select_callback_reports_error_ephemerally(self) -> None:
         api = AsyncMock()
         api.get_item.side_effect = NotFoundError(404, "gone")
-        view = ItemMatchView([_summary(item_id=2)])
+        view = ItemMatchView(1, [_summary(item_id=2)])
         view._select._values = ["2"]
         interaction = _make_interaction(api)
 
@@ -266,7 +288,10 @@ class TestOnMessageUnfurl:
 
         api.get_item.assert_awaited_once_with(19019)
         message.channel.send.assert_awaited_once()
-        assert message.channel.send.await_args.kwargs["embed"].title == "Thunderfury"
+        send_kwargs = message.channel.send.await_args.kwargs
+        assert send_kwargs["embed"].title == "Thunderfury"
+        labels = [button.label for button in send_kwargs["view"].children]
+        assert labels == ["Item page", "Wowhead"]
 
     async def test_unknown_item_link_is_skipped_silently(self) -> None:
         api = AsyncMock()

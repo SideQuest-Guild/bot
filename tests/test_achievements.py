@@ -17,6 +17,8 @@ from sidequest_bot.plugins.achievements import (
     AchievementsCog,
     _AchievementCache,
     _autocomplete_achievement,
+    achievement_link_buttons,
+    achievement_link_view,
     build_achievement_embed,
     match_option,
 )
@@ -112,10 +114,25 @@ class TestBuildAchievementEmbed:
         embed = build_achievement_embed(_achievement(reward_description=None))
         assert "Reward" not in [field.name for field in embed.fields]
 
-    def test_site_field_links_to_detail_page(self) -> None:
+    def test_has_no_links_field(self) -> None:
         embed = build_achievement_embed(_achievement(achievement_id=7))
-        field_names = {field.name: field.value for field in embed.fields}
-        assert "https://sidequest-guild.com/achievements/detail/?id=7" in field_names["Site"]
+        assert "Site" not in [field.name for field in embed.fields]
+
+
+class TestAchievementLinkButtons:
+    def test_site_and_wowhead_buttons(self) -> None:
+        site, wowhead = achievement_link_buttons(7)
+        assert site.label == "Site"
+        assert site.url == "https://sidequest-guild.com/achievements/detail/?id=7"
+        assert wowhead.label == "Wowhead"
+        assert wowhead.url == "https://www.wowhead.com/forever/achievement=7"
+
+
+class TestAchievementLinkView:
+    def test_holds_both_link_buttons(self) -> None:
+        view = achievement_link_view(7)
+        labels = [button.label for button in view.children]
+        assert labels == ["Site", "Wowhead"]
 
 
 class TestMatchOption:
@@ -241,7 +258,8 @@ class TestAchievementCommand:
         api.get_achievement.assert_awaited_once_with(42)
         kwargs = interaction.followup.send.await_args.kwargs
         assert kwargs["embed"].title == "Explorer"
-        assert "ephemeral" not in kwargs
+        labels = [button.label for button in kwargs["view"].children]
+        assert labels == ["Site", "Wowhead"]
 
     async def test_digit_name_not_found(self) -> None:
         api = AsyncMock()
@@ -295,7 +313,7 @@ class TestAchievementCommand:
         message = interaction.followup.send.await_args.args[0]
         assert NOT_FOUND_HINT in message
 
-    async def test_single_match_sends_embed_without_select(self) -> None:
+    async def test_single_match_sends_link_buttons_without_select(self) -> None:
         api = AsyncMock()
         api.list_achievement_categories.return_value = [AchievementCategoryTree(id=1, name="Root", children=[])]
         api.get_achievement_category.return_value = AchievementCategorySchema(
@@ -309,7 +327,8 @@ class TestAchievementCommand:
 
         kwargs = interaction.followup.send.await_args.kwargs
         assert kwargs["embed"].title == "Explorer"
-        assert "view" not in kwargs
+        labels = [button.label for button in kwargs["view"].children]
+        assert labels == ["Site", "Wowhead"]
 
     async def test_multiple_matches_offers_select_of_others(self) -> None:
         api = AsyncMock()
@@ -344,14 +363,19 @@ class TestAchievementCommand:
 
 class TestAchievementMatchView:
     def test_options_use_match_names_and_ids(self) -> None:
-        view = AchievementMatchView([_summary(achievement_id=1, name="A"), _summary(achievement_id=2, name="B")])
+        view = AchievementMatchView(1, [_summary(achievement_id=1, name="A"), _summary(achievement_id=2, name="B")])
         assert [option.label for option in view._select.options] == ["A", "B"]
         assert [option.value for option in view._select.options] == ["1", "2"]
+
+    def test_link_buttons_point_at_initial_achievement(self) -> None:
+        view = AchievementMatchView(1, [_summary(achievement_id=2, name="B")])
+        assert view._site_button.url == "https://sidequest-guild.com/achievements/detail/?id=1"
+        assert view._wowhead_button.url == "https://www.wowhead.com/forever/achievement=1"
 
     async def test_select_callback_edits_message_with_chosen_achievement(self) -> None:
         api = AsyncMock()
         api.get_achievement.return_value = _achievement(achievement_id=2, name="B")
-        view = AchievementMatchView([_summary(achievement_id=2, name="B")])
+        view = AchievementMatchView(1, [_summary(achievement_id=2, name="B")])
         view._select._values = ["2"]
         interaction = _make_interaction(api=api)
 
@@ -361,11 +385,13 @@ class TestAchievementMatchView:
         kwargs = interaction.response.edit_message.await_args.kwargs
         assert kwargs["embed"].title == "B"
         assert kwargs["view"] is view
+        assert view._site_button.url == "https://sidequest-guild.com/achievements/detail/?id=2"
+        assert view._wowhead_button.url == "https://www.wowhead.com/forever/achievement=2"
 
     async def test_select_callback_reports_error_ephemerally(self) -> None:
         api = AsyncMock()
         api.get_achievement.side_effect = NotFoundError(404, "gone")
-        view = AchievementMatchView([_summary(achievement_id=2)])
+        view = AchievementMatchView(1, [_summary(achievement_id=2)])
         view._select._values = ["2"]
         interaction = _make_interaction(api=api)
 

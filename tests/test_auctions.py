@@ -25,6 +25,7 @@ from sidequest_bot.plugins.auctions import (
     AuctionsCog,
     _autocomplete_item,
     build_alert_embed,
+    build_alert_view,
     build_price_embed,
     format_price,
     item_choice,
@@ -204,7 +205,7 @@ class TestBuildAlertEmbed:
     def test_title_price_quantity_and_house(self) -> None:
         embed = build_alert_embed(_alert())
         assert embed.title == "Thunderfury is on sale"
-        assert "sidequest-guild.com/items/detail/?id=19019" in (embed.description or "")
+        assert embed.url == "https://sidequest-guild.com/items/detail/?id=19019"
         field_values = {f.name: f.value for f in embed.fields}
         assert field_values["Price"] == "9s (your max: 10s)"
         assert field_values["Quantity"] == "3"
@@ -213,6 +214,14 @@ class TestBuildAlertEmbed:
     def test_missing_item_name_falls_back_to_id(self) -> None:
         embed = build_alert_embed(_alert(item_name=None))
         assert embed.title == "Item 19019 is on sale"
+
+
+class TestBuildAlertView:
+    def test_view_on_the_site_button(self) -> None:
+        view = build_alert_view(_alert())
+        (button,) = view.children
+        assert button.label == "View on the site"
+        assert button.url == "https://sidequest-guild.com/items/detail/?id=19019"
 
 
 class TestBuildPriceEmbed:
@@ -353,6 +362,9 @@ class TestSendAlert:
         await cog._send_alert(guild, alert)
 
         member.send.assert_awaited_once()
+        send_kwargs = member.send.await_args.kwargs
+        (button,) = send_kwargs["view"].children
+        assert button.label == "View on the site"
         api.ack_auction_alert.assert_awaited_once_with(guild.id, alert.id)
 
     async def test_forbidden_dm_is_still_acked(self) -> None:

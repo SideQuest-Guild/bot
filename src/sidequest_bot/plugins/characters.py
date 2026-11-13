@@ -15,7 +15,7 @@ from discord.ext import commands
 
 from sidequest_bot.api_client import APIError, CharacterPage, CharacterSummary, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
-from sidequest_bot.lib.embeds import Colors, make_embed, truncate
+from sidequest_bot.lib.embeds import Colors, link_button, link_view, make_embed, truncate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -161,8 +161,12 @@ def build_character_embed(character: CharacterPage) -> discord.Embed:
         embed.add_field(name="Gear", value=build_gear_field(character.sheet.gear), inline=False)
     if character.sheet is not None and character.sheet.hunter_pets:
         embed.add_field(name="Pets", value=build_pets_field(character.sheet.hunter_pets), inline=False)
-    embed.add_field(name="Armory", value=f"[View on Armory]({ARMORY_URL.format(slug=character.slug)})", inline=False)
     return embed
+
+
+def character_link_view(slug: str) -> discord.ui.View:
+    """A view holding the character's Armory link button."""
+    return link_view(link_button("View on Armory", ARMORY_URL.format(slug=slug)))
 
 
 class CharactersCog(commands.Cog):
@@ -195,7 +199,7 @@ class CharactersCog(commands.Cog):
                 "Couldn't look up that character right now; try again shortly.", ephemeral=True
             )
             return
-        await interaction.followup.send(embed=build_character_embed(page))
+        await interaction.followup.send(embed=build_character_embed(page), view=character_link_view(page.slug))
 
 
 async def setup(bot: SideQuestBot) -> None:

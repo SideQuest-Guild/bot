@@ -25,6 +25,7 @@ from sidequest_bot.plugins.characters import (
     build_gear_field,
     build_pets_field,
     character_choice,
+    character_link_view,
     class_color,
     gear_line,
     guild_value,
@@ -218,7 +219,10 @@ class TestBuildCharacterEmbed:
         assert "Item level" in field_names
         assert "Last login" in field_names
         assert "PvP" in field_names
-        assert "Armory" in field_names
+
+    def test_has_no_armory_field(self) -> None:
+        embed = build_character_embed(_page())
+        assert "Armory" not in [field.name for field in embed.fields]
 
     def test_omits_missing_optional_fields(self) -> None:
         character = _page(item_level=None, last_login_at=None, honorable_kills=None, pvp_rank=None)
@@ -249,6 +253,14 @@ class TestBuildCharacterEmbed:
         embed = build_character_embed(character)
         field_names = {field.name: field.value for field in embed.fields}
         assert field_names["Pets"] == "Boar (Great Goretusk) 19 · active"
+
+
+class TestCharacterLinkView:
+    def test_armory_button(self) -> None:
+        view = character_link_view("nox-zul")
+        (button,) = view.children
+        assert button.label == "View on Armory"
+        assert button.url == "https://worldofwarcraft.blizzard.com/en-us/forever/us/armory/character/nox-zul"
 
 
 class TestAutocomplete:
@@ -313,6 +325,8 @@ class TestWhoCommand:
         kwargs = interaction.followup.send.await_args.kwargs
         assert kwargs["embed"].title == "Nox Zul"
         assert "ephemeral" not in kwargs
+        (button,) = kwargs["view"].children
+        assert button.label == "View on Armory"
 
     async def test_not_found_sends_api_detail_ephemeral(self) -> None:
         api = AsyncMock()

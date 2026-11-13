@@ -13,6 +13,7 @@ from sidequest_bot.plugins.badges import (
     badge_grant_reason,
     badge_icon,
     build_badge_embed,
+    build_badge_view,
     create_badge_role,
     hall_of_heroes_url,
     plan_badge_role_changes,
@@ -136,23 +137,26 @@ class TestHallOfHeroesUrl:
 
 class TestBuildBadgeEmbed:
     def test_includes_mention_name_and_description(self) -> None:
-        embed = build_badge_embed(_announcement(), "https://sidequest-guild.com/heroes/", with_icon=True)
+        embed = build_badge_embed(_announcement(), with_icon=True)
         assert "<@1>" in embed.description
         assert "Raid Regular" in embed.description
         assert "Attended 10 raids with the guild." in embed.description
 
-    def test_includes_hall_of_heroes_link_field(self) -> None:
-        embed = build_badge_embed(_announcement(), "https://sidequest-guild.com/heroes/", with_icon=True)
-        link_field = next(f for f in embed.fields if f.name == "Hall of Heroes")
-        assert "https://sidequest-guild.com/heroes/" in link_field.value
-
     def test_badge_image_is_the_thumbnail_and_replaces_the_emoji(self) -> None:
-        with_icon = build_badge_embed(_announcement(), "https://x/heroes/", with_icon=True)
-        without = build_badge_embed(_announcement(), "https://x/heroes/", with_icon=False)
+        with_icon = build_badge_embed(_announcement(), with_icon=True)
+        without = build_badge_embed(_announcement(), with_icon=False)
         assert with_icon.thumbnail.url == f"attachment://{BADGE_ICON_FILENAME}"
         assert with_icon.title == "Badge earned!"
         assert without.thumbnail.url is None
         assert without.title != "Badge earned!"
+
+
+class TestBuildBadgeView:
+    def test_hall_of_heroes_button_links_to_profile_url(self) -> None:
+        view = build_badge_view("https://sidequest-guild.com/heroes/")
+        (button,) = view.children
+        assert button.label == "Hall of Heroes"
+        assert button.url == "https://sidequest-guild.com/heroes/"
 
 
 class TestBadgeIcons:
@@ -355,6 +359,8 @@ class TestAnnouncePending:
         allowed_mentions = send_kwargs["allowed_mentions"]
         assert allowed_mentions.users == [member]
         assert [f.filename for f in send_kwargs["files"]] == [BADGE_ICON_FILENAME]
+        (button,) = send_kwargs["view"].children
+        assert button.label == "Hall of Heroes"
         api.ack_badge.assert_awaited_once_with(guild.id, BadgeAck(discord_id=1, badge_id="raid_regular"))
 
     async def test_no_channel_configured_skips_posting_and_does_not_ack(self) -> None:

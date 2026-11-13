@@ -33,7 +33,6 @@ from discord.ext import commands, tasks
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.embeds import Colors
-from sidequest_bot.plugins.auctions import format_price
 from sidequest_bot.plugins.group_finder import OpenVoiceButton
 from sidequest_common.schemas import (
     EVENT_KIND_LABELS,
@@ -179,28 +178,37 @@ def build_counts_line(push: DiscordEventPush) -> str:
 
 
 RECRUITMENT_RULES_LINE = (
-    "Invite new players to the guild. You earn 1g for each recruit who stays 7 days and reaches level 10. "
-    "Payouts go out a week after the drive ends."
+    "Invite new players to the guild. Whoever brings in the most recruits who stay 7 days and reach level 10 "
+    "wins 1g, and ties each win 1g. Payouts go out a week after the drive ends."
 )
 
 
-def _recruitment_leader_line(leader: RecruitLeader) -> str:
-    """One leaderboard row, e.g. "<@123> — 3 qualified · 4 joined · 5 invited"."""
+def _recruitment_leader_line(leader: RecruitLeader, *, crowned: bool) -> str:
+    """One leaderboard row, e.g. "👑 <@123> — 3 qualified · 4 joined · 5 invited".
+
+    ``crowned`` prefixes the row with 👑 for the inviter(s) tied for the most qualified recruits in the drive.
+    """
     who = f"<@{leader.discord_id}>" if leader.discord_id is not None else f"**{leader.member_name or leader.inviter}**"
-    return f"{who} — {leader.qualified} qualified · {leader.joined} joined · {leader.invited} invited"
+    prefix = "👑 " if crowned else ""
+    return f"{prefix}{who} — {leader.qualified} qualified · {leader.joined} joined · {leader.invited} invited"
 
 
 def build_recruitment_leaderboard(tally: RecruitmentTally, *, max_len: int) -> str:
     """The leaderboard block for a recruitment drive's forum starter post.
 
     Top inviters, the payout date, and the rules line, trimmed (dropping the lowest-ranked inviters first) to
-    fit within ``max_len`` chars.
+    fit within ``max_len`` chars. The inviter(s) tied for the most qualified recruits are marked with 👑; nobody
+    is marked when the top qualified count is 0.
     """
     settle_line = f"Payouts settle <t:{int(tally.settles_at.timestamp())}:D>."
     footer = f"{settle_line}\n{RECRUITMENT_RULES_LINE}"
     if not tally.leaders:
         return f"No invites yet.\n\n{footer}"
-    lines = [_recruitment_leader_line(leader) for leader in tally.leaders]
+    top_qualified = max(leader.qualified for leader in tally.leaders)
+    lines = [
+        _recruitment_leader_line(leader, crowned=top_qualified > 0 and leader.qualified == top_qualified)
+        for leader in tally.leaders
+    ]
     for shown in range(len(lines), 0, -1):
         hidden = len(lines) - shown
         board = "\n".join(lines[:shown]) + (f"\n+{hidden} more" if hidden else "")
@@ -267,13 +275,13 @@ def build_activity_line(activity: SignupActivity) -> str:
 
 
 def build_recruit_shoutout_line(shoutout: RecruitShoutout) -> str:
-    """One forum comment for a qualified recruit, e.g. "🎉 <@123>'s recruit **Oakenshield** stayed 7 days. 1g earned!".
+    """One forum comment for a qualified recruit, e.g. "🎉 <@123>'s recruit **Oakenshield** stayed 7 days!".
 
     The inviter is @-mentioned when the row carries their Discord id, else their character name is bolded, the
     same mention-or-bold rule :func:`build_activity_line` uses.
     """
     who = f"<@{shoutout.inviter_discord_id}>" if shoutout.inviter_discord_id is not None else f"**{shoutout.inviter}**"
-    return f"🎉 {who}'s recruit **{shoutout.recruit}** stayed 7 days. {format_price(shoutout.reward_copper)} earned!"
+    return f"🎉 {who}'s recruit **{shoutout.recruit}** stayed 7 days!"
 
 
 def _find_tag(tags: Sequence[discord.ForumTag], kind: EventKind) -> discord.ForumTag | None:

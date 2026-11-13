@@ -529,9 +529,9 @@ class TestBuildStarterMessage:
         assert "Going" not in message
         assert "Sign up: " not in message
         assert "Drive details: " in message
-        assert "<@123> — 1 qualified · 2 joined · 3 invited" in message
+        assert "👑 <@123> — 1 qualified · 2 joined · 3 invited" in message
         assert "Payouts settle <t:" in message
-        assert "Invite new players to the guild." in message
+        assert "Whoever brings in the most recruits who stay 7 days and reach level 10 wins 1g" in message
         assert len(message) <= 2000
 
     def test_recruitment_drive_with_many_leaders_still_fits(self) -> None:
@@ -577,7 +577,7 @@ class TestBuildRecruitmentLeaderboard:
             ],
         )
         board = build_recruitment_leaderboard(tally, max_len=2000)
-        assert "<@1> — 1 qualified · 1 joined · 1 invited" in board
+        assert "👑 <@1> — 1 qualified · 1 joined · 1 invited" in board
         assert "**Wrenna** — 0 qualified · 1 joined · 3 invited" in board
 
     def test_trims_lowest_ranked_leaders_to_fit_budget(self) -> None:
@@ -593,7 +593,41 @@ class TestBuildRecruitmentLeaderboard:
         board = build_recruitment_leaderboard(tally, max_len=400)
         assert len(board) <= 400
         assert "more" in board
-        assert "Invite new players to the guild." in board
+        assert "Whoever brings in the most recruits who stay 7 days and reach level 10 wins 1g" in board
+
+    def test_crowns_every_tied_leader_at_the_top(self) -> None:
+        tally = RecruitmentTally(
+            reward_copper=10_000,
+            settles_at=datetime(2026, 2, 1, tzinfo=UTC),
+            invited=6,
+            joined=4,
+            qualified=2,
+            leaders=[
+                _fake_leader(discord_id="1", inviter="Oak", qualified=2, joined=2, invited=2),
+                _fake_leader(discord_id="2", inviter="Wren", qualified=2, joined=2, invited=2),
+                _fake_leader(discord_id="3", inviter="Kay", qualified=1, joined=2, invited=2),
+            ],
+        )
+        board = build_recruitment_leaderboard(tally, max_len=2000)
+        assert "👑 <@1> — 2 qualified · 2 joined · 2 invited" in board
+        assert "👑 <@2> — 2 qualified · 2 joined · 2 invited" in board
+        assert "👑 <@3>" not in board
+        assert "<@3> — 1 qualified · 2 joined · 2 invited" in board
+
+    def test_no_crown_when_nobody_has_qualified(self) -> None:
+        tally = RecruitmentTally(
+            reward_copper=10_000,
+            settles_at=datetime(2026, 2, 1, tzinfo=UTC),
+            invited=3,
+            joined=1,
+            qualified=0,
+            leaders=[
+                _fake_leader(discord_id="1", inviter="Oak", qualified=0, joined=1, invited=2),
+                _fake_leader(discord_id="2", inviter="Wren", qualified=0, joined=0, invited=1),
+            ],
+        )
+        board = build_recruitment_leaderboard(tally, max_len=2000)
+        assert "👑" not in board
 
 
 class TestBuildActivityLine:
@@ -650,7 +684,7 @@ class TestBuildRecruitShoutoutLine:
             recruit="Newblood",
             reward_copper=10_000,
         )
-        assert build_recruit_shoutout_line(shoutout) == ("🎉 <@123>'s recruit **Newblood** stayed 7 days. 1g earned!")
+        assert build_recruit_shoutout_line(shoutout) == ("🎉 <@123>'s recruit **Newblood** stayed 7 days!")
 
     def test_bolds_inviter_name_without_discord_id(self) -> None:
         shoutout = RecruitShoutout(
@@ -662,9 +696,7 @@ class TestBuildRecruitShoutoutLine:
             recruit="Newblood",
             reward_copper=10_000,
         )
-        assert build_recruit_shoutout_line(shoutout) == (
-            "🎉 **Oakenshield**'s recruit **Newblood** stayed 7 days. 1g earned!"
-        )
+        assert build_recruit_shoutout_line(shoutout) == ("🎉 **Oakenshield**'s recruit **Newblood** stayed 7 days!")
 
 
 class TestFindTag:

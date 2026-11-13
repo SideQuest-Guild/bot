@@ -1248,7 +1248,7 @@ wheels = [
 [[package]]
 name = "sidequest-api"
 version = "0.1.0"
-source = { git = "https://github.com/SideQuest-Guild/website?subdirectory=api&rev=53a0d792b46953eab62bf48417d8bcfdd35a3436#53a0d792b46953eab62bf48417d8bcfdd35a3436" }
+source = { git = "https://github.com/SideQuest-Guild/website?subdirectory=api&rev=59a86f9575d409ec76f9d24766eeb1acd39dba52#59a86f9575d409ec76f9d24766eeb1acd39dba52" }
 dependencies = [
     { name = "advanced-alchemy", extra = ["uuid"] },
     { name = "alembic" },
@@ -1297,7 +1297,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "pydantic", specifier = ">=2.14" },
     { name = "pydantic-settings", specifier = ">=2.16" },
-    { name = "sidequest-common", git = "https://github.com/SideQuest-Guild/website?subdirectory=packages%2Fsidequest-common&rev=53a0d792b46953eab62bf48417d8bcfdd35a3436" },
+    { name = "sidequest-common", git = "https://github.com/SideQuest-Guild/website?subdirectory=packages%2Fsidequest-common&rev=59a86f9575d409ec76f9d24766eeb1acd39dba52" },
     { name = "tenacity", specifier = ">=9.2" },
 ]
 
@@ -1311,13 +1311,13 @@ dev = [
     { name = "pytest-socket", specifier = ">=0.7" },
     { name = "respx", specifier = ">=0.23" },
     { name = "ruff", specifier = ">=0.17" },
-    { name = "sidequest-api", git = "https://github.com/SideQuest-Guild/website?subdirectory=api&rev=53a0d792b46953eab62bf48417d8bcfdd35a3436" },
+    { name = "sidequest-api", git = "https://github.com/SideQuest-Guild/website?subdirectory=api&rev=59a86f9575d409ec76f9d24766eeb1acd39dba52" },
 ]
 
 [[package]]
 name = "sidequest-common"
 version = "0.1.0"
-source = { git = "https://github.com/SideQuest-Guild/website?subdirectory=packages%2Fsidequest-common&rev=53a0d792b46953eab62bf48417d8bcfdd35a3436#53a0d792b46953eab62bf48417d8bcfdd35a3436" }
+source = { git = "https://github.com/SideQuest-Guild/website?subdirectory=packages%2Fsidequest-common&rev=59a86f9575d409ec76f9d24766eeb1acd39dba52#59a86f9575d409ec76f9d24766eeb1acd39dba52" }
 dependencies = [
     { name = "advanced-alchemy" },
     { name = "pydantic" },
@@ -1578,16 +1578,16 @@ wheels = [
 
 [[package]]
 name = "wow"
-version = "0.5.1"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "httpx" },
     { name = "msgspec" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/29/813eba9dbb3dff4c43ffc09314a7f7e720fbc5b3976efa5eaaa9b8fc8470/wow-0.5.1.tar.gz", hash = "sha256:822e0bd958c41d5bc33b37fe47813e978fddbbcbd896fe8deb422ca932e6f849", size = 60146, upload-time = "2026-11-11T20:00:42.06Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/12/8220aadc97225cc5677d61ea3d7f43eef4cd195363e8e9be93f3bda608f7/wow-0.6.0.tar.gz", hash = "sha256:4e7f92d8605a1a8f863926594e0efe2a26e4851a4c07b72c9bc3f8da756f95e2", size = 63669, upload-time = "2026-11-13T19:33:30.697Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/f2/ee438e0fd5b0d6a87ddadf5bc8a1c6ece8f06168607f05d8f91f4743d4bc/wow-0.5.1-py3-none-any.whl", hash = "sha256:7fefdf636628e3e5862998c1db7d549901a4328ccc68470013989dbffbe2311a", size = 90634, upload-time = "2026-11-11T20:00:40.669Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/c4/980458c2ecb7deeffc21f45ff5573a2ade1c1504b8ddb193ed450b1011a8/wow-0.6.0-py3-none-any.whl", hash = "sha256:7125ef011a6f4ba0b1aff228c5b4f5dbcf1085a2ceebe88035ed295f5cbaeee7", size = 100580, upload-time = "2026-11-13T19:33:29.428Z" },
 ]
 
 [[package]]

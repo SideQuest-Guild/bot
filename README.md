@@ -12,7 +12,9 @@ lives there.
 
 - **Events.** Every guild event has a Discord event and a thread in the events forum. The thread has **Going**,
   **Maybe** and **Can't** buttons. For a raid or dungeon the bot asks for your character, class and role the first
-  time, then reuses them. Sign-ups made here and on the website are the same sign-up.
+  time, then reuses them. Sign-ups made here and on the website are the same sign-up. A recruitment drive's thread
+  has no sign-up buttons; its starter post shows a leaderboard of top inviters instead, and the bot posts a
+  shout-out in the thread each time a recruit qualifies.
 - **Roles from the website.** Sign in on the website and you get *Signed the Ledger*. Link Battle.net and you get
   *Battle-Tagged*. When you're confirmed in the guild in game, you get *New Arrival* and the guild channels open.
   Linking Battle.net confirms you by itself once one of your characters is on the guild roster (the bot checks every
@@ -55,7 +57,8 @@ lives there.
 - **Away on a Quest.** Mark away dates on the website and you hold this role for those days.
 - **The weekly board.** Every Monday at 10:00 Central the bot posts a card for each of the week's events, with
   Going, Maybe and Can't buttons, **More info** and **Thread** links, and who's going, maybe or can't. The cards keep
-  up as people sign up. A week with no events gets no cards.
+  up as people sign up. A week with no events gets no cards. A recruitment drive's card has no sign-up buttons or
+  lists; it shows how many recruits are invited, joined and qualified instead.
 - **WoW: Forever news.** Every five minutes the bot checks Blizzard's own forum posts about WoW: Forever and
   Wowhead's WoW: Forever news, and posts each new one in the feed channel with a link to the full post.
 - **Addons.** `#addons`, right below `#rules`, lists the community addons the guild recommends for WoW: Forever,

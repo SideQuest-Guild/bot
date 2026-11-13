@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 import discord
 import pytest
 
-from sidequest_bot.api_client import APIError, NotFoundError
+from sidequest_bot.api_client import APIError, NotFoundError, SideQuestAPI
 from sidequest_bot.plugins.event_sync import (
     MAX_CARD_FIELD_LENGTH,
     ChangeSignupDetailsButton,
@@ -30,6 +30,8 @@ from sidequest_bot.plugins.event_sync import (
     build_change_custom_id,
     build_counts_line,
     build_event_card,
+    build_recruit_shoutout_line,
+    build_recruitment_leaderboard,
     build_signup_custom_id,
     build_signup_list,
     build_signup_view,
@@ -46,6 +48,9 @@ from sidequest_common.schemas import (
     DiscordEventStatus,
     EventCounts,
     EventKind,
+    RecruitLeader,
+    RecruitmentTally,
+    RecruitShoutout,
     Signup,
     SignupActivity,
     SignupByDiscord,
@@ -55,6 +60,9 @@ from sidequest_common.schemas import (
     SignupStatus,
     WowClass,
 )
+from sidequest_common.settings import WebSettings
+
+SITE_GUILD_ID = WebSettings(_env_file=None).GUILD_ID
 
 
 def _discord_error(cls: type[discord.HTTPException], *, status: int, reason: str = "error") -> discord.HTTPException:
@@ -102,6 +110,7 @@ def _fake_push(
     starts_at: datetime = datetime(2099, 1, 1, tzinfo=UTC),
     ends_at: datetime = datetime(2099, 1, 1, 3, tzinfo=UTC),
     counts: EventCounts | None = None,
+    recruitment: RecruitmentTally | None = None,
 ) -> DiscordEventPush:
     return DiscordEventPush(
         event_id=event_id or uuid4(),
@@ -118,6 +127,7 @@ def _fake_push(
         ends_at=ends_at,
         signup_url="https://example.com/events/detail/?id=abc",
         push_hash="hash",
+        recruitment=recruitment,
     )
 
 
@@ -475,6 +485,20 @@ def _fake_forum(*, guild_id: int = 42, available_tags: list | None = None) -> Ma
     return forum
 
 
+def _fake_leader(**overrides: object) -> RecruitLeader:
+    defaults: dict[str, object] = {
+        "inviter": "Oakenshield",
+        "member_name": None,
+        "discord_id": None,
+        "invited": 1,
+        "joined": 1,
+        "counting": 0,
+        "qualified": 1,
+    }
+    defaults.update(overrides)
+    return RecruitLeader.model_validate(defaults)
+
+
 class TestBuildStarterMessage:
     def test_fits_within_2000_chars_with_long_notes(self) -> None:
         push = _fake_push(discord_event_id=1).model_copy(update={"description": "x" * 5000})
@@ -490,6 +514,86 @@ class TestBuildStarterMessage:
         assert "Come hang out" in message
         assert "Sign up: " in message
         assert "https://discord.com/events/42/1" in message
+
+    def test_recruitment_drive_shows_leaderboard_not_counts_and_no_sign_up_link(self) -> None:
+        tally = RecruitmentTally(
+            reward_copper=10_000,
+            settles_at=datetime(2026, 2, 1, tzinfo=UTC),
+            invited=5,
+            joined=3,
+            qualified=1,
+            leaders=[_fake_leader(discord_id="123", qualified=1, joined=2, invited=3)],
+        )
+        push = _fake_push(discord_event_id=1, kind=EventKind.RECRUITMENT, recruitment=tally)
+        message = build_starter_message(push, guild_id=42, discord_event_id=1)
+        assert "Going" not in message
+        assert "Sign up: " not in message
+        assert "Drive details: " in message
+        assert "<@123> — 1 qualified · 2 joined · 3 invited" in message
+        assert "Payouts settle <t:" in message
+        assert "Invite new players to the guild." in message
+        assert len(message) <= 2000
+
+    def test_recruitment_drive_with_many_leaders_still_fits(self) -> None:
+        leaders = [_fake_leader(inviter=f"Character{index:02d}", qualified=index) for index in range(15)]
+        tally = RecruitmentTally(
+            reward_copper=10_000,
+            settles_at=datetime(2026, 2, 1, tzinfo=UTC),
+            invited=50,
+            joined=40,
+            qualified=15,
+            leaders=leaders,
+        )
+        push = _fake_push(discord_event_id=1, kind=EventKind.RECRUITMENT, recruitment=tally)
+        message = build_starter_message(push, guild_id=42, discord_event_id=1)
+        assert len(message) <= 2000
+        assert "Invite new players to the guild." in message
+
+    def test_recruitment_drive_with_no_leaders_yet(self) -> None:
+        tally = RecruitmentTally(
+            reward_copper=10_000,
+            settles_at=datetime(2026, 2, 1, tzinfo=UTC),
+            invited=0,
+            joined=0,
+            qualified=0,
+            leaders=[],
+        )
+        push = _fake_push(discord_event_id=1, kind=EventKind.RECRUITMENT, recruitment=tally)
+        message = build_starter_message(push, guild_id=42, discord_event_id=1)
+        assert "No invites yet." in message
+
+
+class TestBuildRecruitmentLeaderboard:
+    def test_mentions_discord_id_when_present_else_bolds_name(self) -> None:
+        tally = RecruitmentTally(
+            reward_copper=10_000,
+            settles_at=datetime(2026, 2, 1, tzinfo=UTC),
+            invited=4,
+            joined=2,
+            qualified=1,
+            leaders=[
+                _fake_leader(discord_id="1", inviter="Oak", qualified=1, joined=1, invited=1),
+                _fake_leader(discord_id=None, inviter="Wren", member_name="Wrenna", qualified=0, joined=1, invited=3),
+            ],
+        )
+        board = build_recruitment_leaderboard(tally, max_len=2000)
+        assert "<@1> — 1 qualified · 1 joined · 1 invited" in board
+        assert "**Wrenna** — 0 qualified · 1 joined · 3 invited" in board
+
+    def test_trims_lowest_ranked_leaders_to_fit_budget(self) -> None:
+        leaders = [_fake_leader(inviter=f"Character{index:02d}") for index in range(15)]
+        tally = RecruitmentTally(
+            reward_copper=10_000,
+            settles_at=datetime(2026, 2, 1, tzinfo=UTC),
+            invited=15,
+            joined=15,
+            qualified=15,
+            leaders=leaders,
+        )
+        board = build_recruitment_leaderboard(tally, max_len=400)
+        assert len(board) <= 400
+        assert "more" in board
+        assert "Invite new players to the guild." in board
 
 
 class TestBuildActivityLine:
@@ -533,6 +637,34 @@ class TestBuildActivityLine:
             id=uuid4(), thread_id=1, display_name="Coffee", action="maybe", discord_id=5, comment="   "
         )
         assert build_activity_line(activity) == "❔ <@5> might make it"
+
+
+class TestBuildRecruitShoutoutLine:
+    def test_mentions_inviter_when_discord_id_present(self) -> None:
+        shoutout = RecruitShoutout(
+            id=uuid4(),
+            thread_id=1,
+            event_id=uuid4(),
+            inviter="Oakenshield",
+            inviter_discord_id=123,
+            recruit="Newblood",
+            reward_copper=10_000,
+        )
+        assert build_recruit_shoutout_line(shoutout) == ("🎉 <@123>'s recruit **Newblood** stayed 7 days. 1g earned!")
+
+    def test_bolds_inviter_name_without_discord_id(self) -> None:
+        shoutout = RecruitShoutout(
+            id=uuid4(),
+            thread_id=1,
+            event_id=uuid4(),
+            inviter="Oakenshield",
+            inviter_discord_id=None,
+            recruit="Newblood",
+            reward_copper=10_000,
+        )
+        assert build_recruit_shoutout_line(shoutout) == (
+            "🎉 **Oakenshield**'s recruit **Newblood** stayed 7 days. 1g earned!"
+        )
 
 
 class TestFindTag:
@@ -646,6 +778,18 @@ class TestEnsureUpsertThread:
 
         assert thread_id is None
 
+    async def test_recruitment_drive_thread_has_no_signup_view(self) -> None:
+        forum = _fake_forum()
+        created_thread = MagicMock()
+        created_thread.id = 999
+        forum.create_thread.return_value = SimpleNamespace(thread=created_thread, message=MagicMock())
+        cog = _make_cog(api=AsyncMock())
+        push = _fake_push(discord_event_id=555, kind=EventKind.RECRUITMENT)
+
+        await cog._ensure_upsert_thread(forum, push, 555)
+
+        assert forum.create_thread.await_args.kwargs["view"] is discord.utils.MISSING
+
 
 class TestEnsureCancelOrCompleteThread:
     async def test_cancel_posts_message_and_archives_locks(self) -> None:
@@ -717,6 +861,25 @@ class TestUpgradeExistingForumThreads:
         starter = MagicMock(
             content="Sign up: https://sidequest-guild.com/events/detail/?id=not-checked", components=[MagicMock()]
         )
+        starter.edit = AsyncMock()
+        thread.fetch_message = AsyncMock(return_value=starter)
+        forum.threads = [thread]
+        cog = _make_cog(api=AsyncMock(), guilds=[forum.guild], forum_channel_id=900)
+        forum.guild.get_channel.return_value = forum
+
+        await cog._upgrade_existing_forum_threads(forum.guild)
+
+        starter.edit.assert_not_awaited()
+
+    async def test_leaves_a_recruitment_drive_thread_without_buttons(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        forum = _fake_forum()
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 42
+        push = _fake_push(discord_event_id=1, kind=EventKind.RECRUITMENT).model_copy(
+            update={"signup_url": f"https://sidequest-guild.com/events/detail/?id={uuid4()}"}
+        )
+        starter = MagicMock(content=build_starter_message(push, guild_id=7, discord_event_id=1), components=[])
         starter.edit = AsyncMock()
         thread.fetch_message = AsyncMock(return_value=starter)
         forum.threads = [thread]
@@ -800,6 +963,110 @@ class TestPostActivity:
         await cog._post_activity(guild, [row])
 
         api.ack_event_activity.assert_not_awaited()
+
+
+class TestPostRecruitShoutouts:
+    async def test_posts_each_row_and_acks_all(self) -> None:
+        guild = _fake_guild()
+        thread = MagicMock(spec=discord.Thread)
+        thread.send = AsyncMock()
+        guild.get_thread = MagicMock(return_value=thread)
+        api = AsyncMock()
+        cog = _make_cog(api=api)
+        rows = [
+            RecruitShoutout(
+                id=uuid4(),
+                thread_id=1,
+                event_id=uuid4(),
+                inviter="Oak",
+                inviter_discord_id=1,
+                recruit="New1",
+                reward_copper=10_000,
+            ),
+            RecruitShoutout(
+                id=uuid4(),
+                thread_id=1,
+                event_id=uuid4(),
+                inviter="Wren",
+                inviter_discord_id=None,
+                recruit="New2",
+                reward_copper=10_000,
+            ),
+        ]
+
+        await cog._post_recruit_shoutouts(guild, rows)
+
+        assert thread.send.await_count == 2
+        acked_ids = api.ack_recruit_shoutouts.await_args.args[1]
+        assert set(acked_ids) == {row.id for row in rows}
+
+    async def test_missing_thread_still_acks(self) -> None:
+        guild = _fake_guild()
+        guild.get_thread = MagicMock(return_value=None)
+        guild.fetch_channel.side_effect = _discord_error(discord.NotFound, status=404)
+        api = AsyncMock()
+        cog = _make_cog(api=api)
+        row = RecruitShoutout(
+            id=uuid4(),
+            thread_id=1,
+            event_id=uuid4(),
+            inviter="Kay",
+            inviter_discord_id=None,
+            recruit="New1",
+            reward_copper=10_000,
+        )
+
+        await cog._post_recruit_shoutouts(guild, [row])
+
+        api.ack_recruit_shoutouts.assert_awaited_once_with(guild.id, [row.id])
+
+    async def test_forbidden_on_send_skips_ack_for_that_row(self) -> None:
+        guild = _fake_guild()
+        thread = MagicMock(spec=discord.Thread)
+        thread.send = AsyncMock(side_effect=_discord_error(discord.Forbidden, status=403))
+        guild.get_thread = MagicMock(return_value=thread)
+        api = AsyncMock()
+        cog = _make_cog(api=api)
+        row = RecruitShoutout(
+            id=uuid4(),
+            thread_id=1,
+            event_id=uuid4(),
+            inviter="Kay",
+            inviter_discord_id=None,
+            recruit="New1",
+            reward_copper=10_000,
+        )
+
+        await cog._post_recruit_shoutouts(guild, [row])
+
+        api.ack_recruit_shoutouts.assert_not_awaited()
+
+    async def test_acks_against_the_real_api(self, api: SideQuestAPI, caplog: pytest.LogCaptureFixture) -> None:
+        """Posts in a mocked Discord thread, then acks for real: the bot and API agree on the ack route's shape.
+
+        No warning means the real ack call succeeded; ``_post_recruit_shoutouts`` swallows ``APIError`` into a
+        log line rather than raising, so a missing or mismatched route surfaces here instead of silently passing.
+        """
+        guild = _fake_guild(guild_id=SITE_GUILD_ID)
+        thread = MagicMock(spec=discord.Thread)
+        thread.send = AsyncMock()
+        guild.get_thread = MagicMock(return_value=thread)
+        cog = _make_cog(api=api)
+        row = RecruitShoutout(
+            id=uuid4(),
+            thread_id=1,
+            event_id=uuid4(),
+            inviter="Oak",
+            inviter_discord_id=1,
+            recruit="New1",
+            reward_copper=10_000,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await cog._post_recruit_shoutouts(guild, [row])
+
+        thread.send.assert_awaited_once()
+        assert "Failed to ack recruit shout-outs" not in caplog.text
 
 
 class TestReportInterest:
@@ -1252,6 +1519,28 @@ class TestBuildEventCard:
         real, _view = _card(location="Goldshire Inn")
         assert (stand_in.description or "").splitlines()[0] == "**Social**"
         assert (real.description or "").splitlines()[0] == "**Social** · Goldshire Inn"
+
+    def test_recruitment_drive_has_no_signup_lists_or_buttons_just_a_short_tally(self) -> None:
+        tally = RecruitmentTally(
+            reward_copper=10_000,
+            settles_at=datetime(2026, 2, 1, tzinfo=UTC),
+            invited=12,
+            joined=5,
+            qualified=3,
+            leaders=[],
+        )
+        embed, view = _card(
+            kind=EventKind.RECRUITMENT,
+            signups=[_board_signup(1, SignupStatus.SIGNED)],
+            state="open",
+            recruitment=tally,
+        )
+        assert _fields(embed) == {"Recruits": "12 invited · 5 joined · 3 qualified"}
+        assert [item.label for item in view.children] == ["More info"]
+
+    def test_recruitment_drive_with_no_tally_shows_no_invites_yet(self) -> None:
+        embed, _view = _card(kind=EventKind.RECRUITMENT, state="open", recruitment=None)
+        assert _fields(embed) == {"Recruits": "No invites yet."}
 
 
 class TestBuildSignupList:

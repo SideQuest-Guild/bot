@@ -33,9 +33,11 @@ from discord.ext import commands, tasks
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.embeds import Colors
+from sidequest_bot.plugins.auctions import format_price
 from sidequest_bot.plugins.group_finder import OpenVoiceButton
 from sidequest_common.schemas import (
     EVENT_KIND_LABELS,
+    NO_SIGNUP_KINDS,
     ROLE_KINDS,
     BoardSignup,
     DiscordEventPush,
@@ -58,7 +60,7 @@ from sidequest_common.settings import WebSettings
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping, Sequence
 
-    from sidequest_common.schemas import WeeklyBoardEvent
+    from sidequest_common.schemas import RecruitLeader, RecruitmentTally, RecruitShoutout, WeeklyBoardEvent
 
 logger = logging.getLogger(__name__)
 
@@ -176,11 +178,44 @@ def build_counts_line(push: DiscordEventPush) -> str:
     return f"{going} · Maybe {counts.tentative} · Can't {counts.absent}"
 
 
+RECRUITMENT_RULES_LINE = (
+    "Invite new players to the guild. You earn 1g for each recruit who stays 7 days and reaches level 10. "
+    "Payouts go out a week after the drive ends."
+)
+
+
+def _recruitment_leader_line(leader: RecruitLeader) -> str:
+    """One leaderboard row, e.g. "<@123> — 3 qualified · 4 joined · 5 invited"."""
+    who = f"<@{leader.discord_id}>" if leader.discord_id is not None else f"**{leader.member_name or leader.inviter}**"
+    return f"{who} — {leader.qualified} qualified · {leader.joined} joined · {leader.invited} invited"
+
+
+def build_recruitment_leaderboard(tally: RecruitmentTally, *, max_len: int) -> str:
+    """The leaderboard block for a recruitment drive's forum starter post.
+
+    Top inviters, the payout date, and the rules line, trimmed (dropping the lowest-ranked inviters first) to
+    fit within ``max_len`` chars.
+    """
+    settle_line = f"Payouts settle <t:{int(tally.settles_at.timestamp())}:D>."
+    footer = f"{settle_line}\n{RECRUITMENT_RULES_LINE}"
+    if not tally.leaders:
+        return f"No invites yet.\n\n{footer}"
+    lines = [_recruitment_leader_line(leader) for leader in tally.leaders]
+    for shown in range(len(lines), 0, -1):
+        hidden = len(lines) - shown
+        board = "\n".join(lines[:shown]) + (f"\n+{hidden} more" if hidden else "")
+        text = f"{board}\n\n{footer}"
+        if len(text) <= max_len:
+            return text
+    return f"+{len(lines)} more\n\n{footer}"
+
+
 def build_starter_message(push: DiscordEventPush, *, guild_id: int, discord_event_id: int) -> str:
     """Forum starter-post content for ``push``, trimmed to fit Discord's 2000-char message limit.
 
-    Layout: kind · location, the start (and end) time as Discord timestamps, the live counts line, the event's
-    notes (trimmed to fit), the sign-up link, and a link back to the Discord event.
+    Layout: kind · location, the start (and end) time as Discord timestamps, then either the live counts line,
+    the event's notes (trimmed to fit) and a sign-up link (most kinds), or a recruitment drive's leaderboard and
+    rules line in their place (``push.kind in NO_SIGNUP_KINDS``), and a link back to the Discord event.
     """
     header_parts = [EVENT_KIND_LABELS[push.kind]]
     if push.location:
@@ -188,10 +223,21 @@ def build_starter_message(push: DiscordEventPush, *, guild_id: int, discord_even
     header = " · ".join(header_parts)
     time_line = f"<t:{int(push.starts_at.timestamp())}:F>"
     time_line += f" - <t:{int(push.ends_at.timestamp())}:F>"
-    counts_line = build_counts_line(push)
+    detail_label = "Drive details" if push.kind in NO_SIGNUP_KINDS else "Sign up"
     links = "\n".join(
-        [f"Sign up: {push.signup_url}", f"Discord event: https://discord.com/events/{guild_id}/{discord_event_id}"]
+        [
+            f"{detail_label}: {push.signup_url}",
+            f"Discord event: https://discord.com/events/{guild_id}/{discord_event_id}",
+        ]
     )
+    if push.kind in NO_SIGNUP_KINDS:
+        skeleton = f"{header}\n\n{time_line}\n\n{links}"
+        budget = MAX_FORUM_STARTER_LENGTH - len(skeleton) - 2
+        if push.recruitment is None or budget <= 0:
+            return skeleton
+        board = build_recruitment_leaderboard(push.recruitment, max_len=budget)
+        return f"{header}\n\n{time_line}\n{board}\n\n{links}"
+    counts_line = build_counts_line(push)
     skeleton = f"{header}\n\n{time_line}\n{counts_line}\n\n{links}"
     notes = _strip_description_footer(push.description)
     if not notes:
@@ -220,6 +266,16 @@ def build_activity_line(activity: SignupActivity) -> str:
     return line
 
 
+def build_recruit_shoutout_line(shoutout: RecruitShoutout) -> str:
+    """One forum comment for a qualified recruit, e.g. "🎉 <@123>'s recruit **Oakenshield** stayed 7 days. 1g earned!".
+
+    The inviter is @-mentioned when the row carries their Discord id, else their character name is bolded, the
+    same mention-or-bold rule :func:`build_activity_line` uses.
+    """
+    who = f"<@{shoutout.inviter_discord_id}>" if shoutout.inviter_discord_id is not None else f"**{shoutout.inviter}**"
+    return f"🎉 {who}'s recruit **{shoutout.recruit}** stayed 7 days. {format_price(shoutout.reward_copper)} earned!"
+
+
 def _find_tag(tags: Sequence[discord.ForumTag], kind: EventKind) -> discord.ForumTag | None:
     """The forum tag whose name matches ``kind``'s label, if the forum already has one."""
     label = EVENT_KIND_LABELS[kind]
@@ -235,6 +291,15 @@ def extract_event_id_from_starter(content: str) -> UUID | None:
         return UUID(match.group(1))
     except ValueError:
         return None
+
+
+_NO_SIGNUP_LABELS: Final = frozenset(EVENT_KIND_LABELS[kind] for kind in NO_SIGNUP_KINDS)
+
+
+def starter_takes_signups(content: str) -> bool:
+    """False for a forum starter post of a kind with no sign-ups (its first line starts with that kind's label)."""
+    kind_label = content.split("\n", 1)[0].split(" · ", 1)[0]
+    return kind_label not in _NO_SIGNUP_LABELS
 
 
 # --- Discord sign-up buttons (Going/Maybe/Can't) -----------------------------------------------------------------
@@ -337,12 +402,14 @@ def build_event_card(
     thread_url: str | None,
     state: CardState,
     emoji: Mapping[WowClass, str],
+    recruitment: RecruitmentTally | None = None,
 ) -> tuple[discord.Embed, discord.ui.View]:
     """One event's weekly-board card: its details, who's going/maybe/can't, and the buttons under it.
 
     Role kinds (raid, dungeon) split Going into tanks, healers and DPS. An open card has Going/Maybe/Can't buttons
     (the forum starter post's ``EventSignupButton``) next to the "More info" and "Thread" links; a cancelled or
-    ended one keeps only the links.
+    ended one keeps only the links. A recruitment drive (``kind in NO_SIGNUP_KINDS``) has no sign-up lists or
+    buttons; it shows a short invited/joined/qualified tally from ``recruitment`` instead.
     """
     header = f"**{EVENT_KIND_LABELS[kind]}**"
     if location and location != _API_DEFAULT_LOCATION:
@@ -359,21 +426,29 @@ def build_event_card(
         description="\n".join(lines),
         colour=_CARD_COLORS[state],
     )
-    going = [signup for signup in signups if signup.status == SignupStatus.SIGNED]
-    lists: list[tuple[str, list[BoardSignup]]] = []
-    if kind in ROLE_KINDS:
-        lists += [
-            (name, [signup for signup in going if signup.role == role]) for role, name in _ROLE_FIELD_NAMES.items()
-        ]
-        going = [signup for signup in going if signup.role is None]
-    if going or kind not in ROLE_KINDS:
-        lists.append((_STATUS_FIELD_NAMES[SignupStatus.SIGNED], going))
-    for status in (SignupStatus.TENTATIVE, SignupStatus.ABSENT):
-        lists.append((_STATUS_FIELD_NAMES[status], [signup for signup in signups if signup.status == status]))
-    for name, members in lists:
-        embed.add_field(name=f"{name} ({len(members)})", value=build_signup_list(members, emoji))
+    if kind in NO_SIGNUP_KINDS:
+        tally_text = (
+            f"{recruitment.invited} invited · {recruitment.joined} joined · {recruitment.qualified} qualified"
+            if recruitment is not None
+            else "No invites yet."
+        )
+        embed.add_field(name="Recruits", value=tally_text)
+    else:
+        going = [signup for signup in signups if signup.status == SignupStatus.SIGNED]
+        lists: list[tuple[str, list[BoardSignup]]] = []
+        if kind in ROLE_KINDS:
+            lists += [
+                (name, [signup for signup in going if signup.role == role]) for role, name in _ROLE_FIELD_NAMES.items()
+            ]
+            going = [signup for signup in going if signup.role is None]
+        if going or kind not in ROLE_KINDS:
+            lists.append((_STATUS_FIELD_NAMES[SignupStatus.SIGNED], going))
+        for status in (SignupStatus.TENTATIVE, SignupStatus.ABSENT):
+            lists.append((_STATUS_FIELD_NAMES[status], [signup for signup in signups if signup.status == status]))
+        for name, members in lists:
+            embed.add_field(name=f"{name} ({len(members)})", value=build_signup_list(members, emoji))
     view = discord.ui.View(timeout=None)
-    if state == "open":
+    if state == "open" and kind not in NO_SIGNUP_KINDS:
         for status in (SignupStatus.SIGNED, SignupStatus.TENTATIVE, SignupStatus.ABSENT):
             view.add_item(EventSignupButton(event_id, status))
         view.add_item(OpenVoiceButton(event_id))
@@ -422,6 +497,7 @@ def card_from_push(
         thread_url=_thread_url(guild.id, thread_id),
         state=_CARD_STATE_BY_ACTION[push.action],
         emoji=class_emoji(guild),
+        recruitment=push.recruitment,
     )
 
 
@@ -797,7 +873,7 @@ class EventSyncCog(commands.Cog):
             starter = await thread.fetch_message(thread.id)
         except discord.NotFound, discord.Forbidden:
             return
-        if starter.components:
+        if starter.components or not starter_takes_signups(starter.content):
             return
         event_id = extract_event_id_from_starter(starter.content)
         if event_id is None:
@@ -822,6 +898,7 @@ class EventSyncCog(commands.Cog):
             if not await self._apply_one(guild, self._apply_push(guild, push)):
                 return
         await self._post_activity(guild, pending.activity)
+        await self._post_recruit_shoutouts(guild, pending.recruit_shoutouts)
 
     async def _apply_one(self, guild: discord.Guild, action: Coroutine[Any, Any, None]) -> bool:
         """Run one push/deletion coroutine. ``False`` means "stop the cycle for this guild" (missing permission)."""
@@ -886,9 +963,12 @@ class EventSyncCog(commands.Cog):
             edit_kwargs: dict[str, Any] = {
                 "name": push.name,
                 "description": push.description,
-                "start_time": _utc(push.starts_at),
                 "end_time": _utc(push.ends_at),
             }
+            if _utc(push.starts_at) > discord.utils.utcnow():
+                # Discord refuses a start in the past; a long event (a recruitment drive) edited after its start
+                # keeps the start it already has.
+                edit_kwargs["start_time"] = _utc(push.starts_at)
             if event.entity_type is _LOCATION_ENTITY_TYPE:
                 edit_kwargs["location"] = push.location
             edited = await event.edit(**edit_kwargs)
@@ -953,12 +1033,15 @@ class EventSyncCog(commands.Cog):
     ) -> int | None:
         name = push.title[:100]
         content = build_starter_message(push, guild_id=forum.guild.id, discord_event_id=discord_event_id)
-        view = build_signup_view(push.event_id)
+        view = None if push.kind in NO_SIGNUP_KINDS else build_signup_view(push.event_id)
         if push.thread_id is None:
             tag = await self._ensure_tag(forum, push.kind)
             try:
                 created = await forum.create_thread(
-                    name=name, content=content, applied_tags=[tag] if tag else [], view=view
+                    name=name,
+                    content=content,
+                    applied_tags=[tag] if tag else [],
+                    view=view if view is not None else discord.utils.MISSING,
                 )
             except discord.Forbidden:
                 self._warn_forum_forbidden(forum.guild.id)
@@ -1099,6 +1182,31 @@ class EventSyncCog(commands.Cog):
             await self.bot.api.ack_event_activity(guild.id, posted_ids)
         except APIError:
             logger.warning("Failed to ack sign-up activity for guild %s", guild.id, exc_info=True)
+
+    async def _post_recruit_shoutouts(self, guild: discord.Guild, shoutouts: list[RecruitShoutout]) -> None:
+        """Post one comment per qualified recruit's shout-out row, then ack whichever rows are settled.
+
+        Mirrors :meth:`_post_activity`: a row with a gone or forbidden thread is still acked once it's
+        undeliverable, so the site doesn't keep retrying a thread that will never accept the post.
+        """
+        posted_ids: list[UUID] = []
+        for row in shoutouts:
+            thread = await self._fetch_thread(guild, row.thread_id)
+            if thread is not None:
+                try:
+                    await thread.send(build_recruit_shoutout_line(row), allowed_mentions=discord.AllowedMentions.none())
+                except discord.NotFound:
+                    pass
+                except discord.Forbidden:
+                    self._warn_forum_forbidden(guild.id)
+                    continue
+            posted_ids.append(row.id)
+        if not posted_ids:
+            return
+        try:
+            await self.bot.api.ack_recruit_shoutouts(guild.id, posted_ids)
+        except APIError:
+            logger.warning("Failed to ack recruit shout-outs for guild %s", guild.id, exc_info=True)
 
     # --- Discord "Interested" -> site --------------------------------------------------------------------------
 

@@ -62,6 +62,7 @@ from sidequest_common.schemas import (
     RankSchema,
     RecipeDetail,
     Recruiting,
+    RecruitShoutoutAck,
     RoleMenuCreate,
     RoleMenuOptionUpsert,
     RoleMenuSchema,
@@ -693,6 +694,12 @@ class SideQuestAPI:
     async def ack_event_activity(self, guild_id: int, ids: list[UUID]) -> None:
         """Confirm these sign-up activity rows were posted in their event's forum thread."""
         await self._request("POST", f"{self._guild(guild_id)}/event-sync/activity/ack", body=ActivityAck(ids=ids))
+
+    async def ack_recruit_shoutouts(self, guild_id: int, ids: list[UUID]) -> None:
+        """Confirm these recruit shout-out rows were posted (or undeliverable) in their drive's forum thread."""
+        await self._request(
+            "POST", f"{self._guild(guild_id)}/event-sync/recruit-shoutouts/ack", body=RecruitShoutoutAck(ids=ids)
+        )
 
     async def get_event_signup_by_discord(self, guild_id: int, event_id: UUID, discord_id: int) -> SignupByDiscord:
         """A member's current signup for ``event_id`` plus their most recent character/class/role, by Discord id.

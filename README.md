@@ -104,7 +104,10 @@ lives there.
   <name>` looks up a recipe (reusing `/crafter`'s search) and shows its reagents, crafted item and the guild
   crafters who know it. `/compare <character1> <character2>` is `/who` for two characters side by side: level,
   class, item level with the lead highlighted, PvP stats, and a per-slot gear comparison table; autocompletes the
-  same way `/who` does.
+  same way `/who` does. `/beast <name> [family]` looks up a tameable beast for hunters and shows its family and a
+  portrait, with autocomplete over the beast catalog and, for `family`, over its families; the catalog takes a
+  while to build on the API's first request of either, so autocomplete may show no suggestions for a few seconds
+  after a deploy.
 - **Auction prices.** `/price <item>` shows an item's lowest current auction price, where it's cheapest, how many
   are listed, and its 14-day price range. `/watch <item> <price>` (e.g. `1g20s`, `35s`, `80c`) DMs you when that
   item's price drops to or below your target; `/unwatch <item>` removes a watch and `/watches` lists yours. Watches

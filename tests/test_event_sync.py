@@ -522,14 +522,14 @@ class TestBuildStarterMessage:
             invited=5,
             joined=3,
             qualified=1,
-            leaders=[_fake_leader(discord_id="123", qualified=1, joined=2, invited=3)],
+            leaders=[_fake_leader(discord_id="123", qualified=1, counting=2, invited=3)],
         )
         push = _fake_push(discord_event_id=1, kind=EventKind.RECRUITMENT, recruitment=tally)
         message = build_starter_message(push, guild_id=42, discord_event_id=1)
         assert "Going" not in message
         assert "Sign up: " not in message
         assert "Drive details: " in message
-        assert "👑 <@123> — 1 qualified · 2 joined · 3 invited" in message
+        assert "👑 <@123> — 1 qualified · 2 potential · 3 invited" in message
         assert "Payouts settle <t:" in message
         assert "Whoever brings in the most recruits who stay 7 days and reach level 10 wins 1g" in message
         assert len(message) <= 2000
@@ -572,13 +572,13 @@ class TestBuildRecruitmentLeaderboard:
             joined=2,
             qualified=1,
             leaders=[
-                _fake_leader(discord_id="1", inviter="Oak", qualified=1, joined=1, invited=1),
-                _fake_leader(discord_id=None, inviter="Wren", member_name="Wrenna", qualified=0, joined=1, invited=3),
+                _fake_leader(discord_id="1", inviter="Oak", qualified=1, counting=1, invited=1),
+                _fake_leader(discord_id=None, inviter="Wren", member_name="Wrenna", qualified=0, counting=1, invited=3),
             ],
         )
         board = build_recruitment_leaderboard(tally, max_len=2000)
-        assert "👑 <@1> — 1 qualified · 1 joined · 1 invited" in board
-        assert "**Wrenna** — 0 qualified · 1 joined · 3 invited" in board
+        assert "👑 <@1> — 1 qualified · 1 potential · 1 invited" in board
+        assert "**Wrenna** — 0 qualified · 1 potential · 3 invited" in board
 
     def test_trims_lowest_ranked_leaders_to_fit_budget(self) -> None:
         leaders = [_fake_leader(inviter=f"Character{index:02d}") for index in range(15)]
@@ -603,16 +603,16 @@ class TestBuildRecruitmentLeaderboard:
             joined=4,
             qualified=2,
             leaders=[
-                _fake_leader(discord_id="1", inviter="Oak", qualified=2, joined=2, invited=2),
-                _fake_leader(discord_id="2", inviter="Wren", qualified=2, joined=2, invited=2),
-                _fake_leader(discord_id="3", inviter="Kay", qualified=1, joined=2, invited=2),
+                _fake_leader(discord_id="1", inviter="Oak", qualified=2, counting=2, invited=2),
+                _fake_leader(discord_id="2", inviter="Wren", qualified=2, counting=2, invited=2),
+                _fake_leader(discord_id="3", inviter="Kay", qualified=1, counting=2, invited=2),
             ],
         )
         board = build_recruitment_leaderboard(tally, max_len=2000)
-        assert "👑 <@1> — 2 qualified · 2 joined · 2 invited" in board
-        assert "👑 <@2> — 2 qualified · 2 joined · 2 invited" in board
+        assert "👑 <@1> — 2 qualified · 2 potential · 2 invited" in board
+        assert "👑 <@2> — 2 qualified · 2 potential · 2 invited" in board
         assert "👑 <@3>" not in board
-        assert "<@3> — 1 qualified · 2 joined · 2 invited" in board
+        assert "<@3> — 1 qualified · 2 potential · 2 invited" in board
 
     def test_no_crown_when_nobody_has_qualified(self) -> None:
         tally = RecruitmentTally(

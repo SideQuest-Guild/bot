@@ -184,13 +184,13 @@ RECRUITMENT_RULES_LINE = (
 
 
 def _recruitment_leader_line(leader: RecruitLeader, *, crowned: bool) -> str:
-    """One leaderboard row, e.g. "👑 <@123> — 3 qualified · 4 joined · 5 invited".
+    """One leaderboard row, e.g. "👑 <@123> — 3 qualified · 4 potential · 5 invited".
 
     ``crowned`` prefixes the row with 👑 for the inviter(s) tied for the most qualified recruits in the drive.
     """
     who = f"<@{leader.discord_id}>" if leader.discord_id is not None else f"**{leader.member_name or leader.inviter}**"
     prefix = "👑 " if crowned else ""
-    return f"{prefix}{who} — {leader.qualified} qualified · {leader.joined} joined · {leader.invited} invited"
+    return f"{prefix}{who} — {leader.qualified} qualified · {leader.counting} potential · {leader.invited} invited"
 
 
 def build_recruitment_leaderboard(tally: RecruitmentTally, *, max_len: int) -> str:

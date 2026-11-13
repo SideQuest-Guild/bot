@@ -9,6 +9,13 @@
     },
     {
       "column": 15,
+      "path": "src/sidequest_bot/plugins/beasts.py",
+      "name": "bad-override",
+      "concise_description": "Class member `_BeastMatchSelect.callback` overrides parent class `Select` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 15,
       "path": "src/sidequest_bot/plugins/event_sync.py",
       "name": "bad-override",
       "concise_description": "Class member `SignupDetailsModal.on_submit` overrides parent class `Modal` in an inconsistent manner",

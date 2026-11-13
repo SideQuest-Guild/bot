@@ -20,6 +20,8 @@ from sidequest_common.schemas import (
     AwayNowReport,
     BadgeAck,
     BadgeSyncReport,
+    BeastFamilySchema,
+    BeastSchema,
     ConfirmByDiscordRequest,
     CouncilLogEntry,
     CouncilLogKind,
@@ -105,6 +107,8 @@ _XP_GRANTS = TypeAdapter(list[XPGrantResult])
 _ADDONS = TypeAdapter(list[AddonSchema])
 _ACHIEVEMENT_CATEGORIES = TypeAdapter(list[AchievementCategoryTree])
 _QUEST_SEARCH_RESULTS = TypeAdapter(list[QuestSearchResult])
+_BEASTS = TypeAdapter(list[BeastSchema])
+_BEAST_FAMILIES = TypeAdapter(list[BeastFamilySchema])
 
 
 class ItemSummary(BaseModel):
@@ -1042,6 +1046,44 @@ class SideQuestAPI:
         """
         data = await self._request("GET", f"/api/quests/{quest_id}")
         return _parse(QuestSchema.model_validate, data)
+
+    # --- Beasts
+
+    async def search_beasts(
+        self, query: str | None = None, *, family_id: int | None = None, limit: int | None = None
+    ) -> list[BeastSchema]:
+        """Tameable beasts matching ``query`` (a substring, prefix match sorting first), sorted by name.
+
+        The public ``/api/beasts`` GET. The first call per API process builds the whole catalog from Battle.net
+        media lookups and can take 10-20 seconds; callers on a tight budget (autocomplete) should apply their own
+        timeout. 503 if Battle.net isn't configured or didn't answer.
+        """
+        params: dict[str, Any] = {}
+        if query is not None:
+            params["q"] = query
+        if family_id is not None:
+            params["family_id"] = family_id
+        if limit is not None:
+            params["limit"] = limit
+        data = await self._request("GET", "/api/beasts", params=params)
+        return _parse(_BEASTS.validate_python, data)
+
+    async def get_beast(self, creature_id: int) -> BeastSchema:
+        """One tameable beast by its Battle.net creature id (the public ``/api/beasts/{id}`` GET).
+
+        Raises ``NotFoundError`` if that creature isn't a tameable beast, or ``APIError`` (status 503) if
+        Battle.net isn't configured or didn't answer.
+        """
+        data = await self._request("GET", f"/api/beasts/{creature_id}")
+        return _parse(BeastSchema.model_validate, data)
+
+    async def list_beast_families(self) -> list[BeastFamilySchema]:
+        """Every beast family among tameable beasts, with its count, sorted by name (public ``/api/beasts/families``).
+
+        503 if Battle.net isn't configured or didn't answer.
+        """
+        data = await self._request("GET", "/api/beasts/families")
+        return _parse(_BEAST_FAMILIES.validate_python, data)
 
     # --- Recipes
 

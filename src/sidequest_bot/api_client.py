@@ -59,6 +59,8 @@ from sidequest_common.schemas import (
     ModCaseUpdate,
     PendingAnnouncement,
     PendingAnnouncementsPage,
+    QuestSchema,
+    QuestSearchResult,
     RankSchema,
     RecipeDetail,
     Recruiting,
@@ -102,6 +104,7 @@ _GROUP_SESSIONS = TypeAdapter(list[GroupSessionSchema])
 _XP_GRANTS = TypeAdapter(list[XPGrantResult])
 _ADDONS = TypeAdapter(list[AddonSchema])
 _ACHIEVEMENT_CATEGORIES = TypeAdapter(list[AchievementCategoryTree])
+_QUEST_SEARCH_RESULTS = TypeAdapter(list[QuestSearchResult])
 
 
 class ItemSummary(BaseModel):
@@ -1020,6 +1023,25 @@ class SideQuestAPI:
         """
         data = await self._request("GET", f"/api/achievements/{achievement_id}")
         return _parse(AchievementSchema.model_validate, data)
+
+    # --- Quests
+
+    async def search_quests(self, query: str, *, limit: int = 10) -> list[QuestSearchResult]:
+        """Quests with ``query`` in their title, case-insensitive, best matches first (public ``/api/quests/search``).
+
+        503 if Battle.net isn't configured or didn't answer.
+        """
+        data = await self._request("GET", "/api/quests/search", params={"q": query, "limit": limit})
+        return _parse(_QUEST_SEARCH_RESULTS.validate_python, data)
+
+    async def get_quest(self, quest_id: int) -> QuestSchema:
+        """One quest by its game ID (the public ``/api/quests/{id}`` GET).
+
+        Raises ``NotFoundError`` for an unknown quest, or ``APIError`` (status 503) if Battle.net isn't configured
+        or didn't answer.
+        """
+        data = await self._request("GET", f"/api/quests/{quest_id}")
+        return _parse(QuestSchema.model_validate, data)
 
     # --- Recipes
 

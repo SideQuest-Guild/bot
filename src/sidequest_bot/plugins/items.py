@@ -8,7 +8,7 @@ search happens on submit rather than as-you-type, and a failed search says so. T
 import logging
 import re
 from http import HTTPStatus
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import discord
 from discord import app_commands
@@ -16,7 +16,7 @@ from discord.ext import commands
 
 from sidequest_bot.api_client import APIError, Item, ItemSummary, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
-from sidequest_bot.lib.embeds import Colors, make_embed, truncate
+from sidequest_bot.lib.embeds import Colors, link_button, link_view, make_embed, truncate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -66,13 +66,20 @@ def build_item_embed(item: Item) -> discord.Embed:
     )
     if item.icon_url:
         embed.set_thumbnail(url=item.icon_url)
-    embed.add_field(
-        name="Links",
-        value=f"[Item page]({ITEM_PAGE_URL.format(item_id=item.item_id)}) • "
-        f"[Wowhead]({WOWHEAD_URL.format(item_id=item.item_id)})",
-        inline=False,
-    )
     return embed
+
+
+def item_link_buttons(item_id: int) -> list[discord.ui.Button]:
+    """Item page + Wowhead link buttons for one item."""
+    return [
+        link_button("Item page", ITEM_PAGE_URL.format(item_id=item_id)),
+        link_button("Wowhead", WOWHEAD_URL.format(item_id=item_id)),
+    ]
+
+
+def item_link_view(item_id: int) -> discord.ui.View:
+    """A view holding just the item's link buttons, for replies with no other matches to offer."""
+    return link_view(*item_link_buttons(item_id))
 
 
 def match_option(match: ItemSummary) -> discord.SelectOption:
@@ -110,16 +117,29 @@ class _ItemMatchSelect(discord.ui.Select["ItemMatchView"]):
         if isinstance(result, str):
             await interaction.response.send_message(result, ephemeral=True)
             return
-        await interaction.response.edit_message(embed=result, view=self.view)
+        view = cast("ItemMatchView", self.view)
+        view.set_item(item_id)
+        await interaction.response.edit_message(embed=result, view=view)
 
 
 class ItemMatchView(discord.ui.View):
-    """A select menu of up to :data:`MAX_OTHER_MATCHES` other search matches, swapping the shown embed on pick."""
+    """Link buttons for the shown item plus a select menu of up to :data:`MAX_OTHER_MATCHES` other matches.
 
-    def __init__(self, matches: Sequence[ItemSummary]) -> None:
+    Picking another match swaps the shown embed and repoints the link buttons at it.
+    """
+
+    def __init__(self, item_id: int, matches: Sequence[ItemSummary]) -> None:
         super().__init__(timeout=180)
+        self._item_page_button, self._wowhead_button = item_link_buttons(item_id)
         self._select = _ItemMatchSelect(matches)
         self.add_item(self._select)
+        self.add_item(self._item_page_button)
+        self.add_item(self._wowhead_button)
+
+    def set_item(self, item_id: int) -> None:
+        """Repoint the link buttons at ``item_id``."""
+        self._item_page_button.url = ITEM_PAGE_URL.format(item_id=item_id)
+        self._wowhead_button.url = WOWHEAD_URL.format(item_id=item_id)
 
 
 class ItemsCog(commands.Cog):
@@ -151,9 +171,9 @@ class ItemsCog(commands.Cog):
             await interaction.followup.send(result, ephemeral=True)
             return
         if others:
-            await interaction.followup.send(embed=result, view=ItemMatchView(others))
+            await interaction.followup.send(embed=result, view=ItemMatchView(best.item_id, others))
         else:
-            await interaction.followup.send(embed=result)
+            await interaction.followup.send(embed=result, view=item_link_view(best.item_id))
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -176,7 +196,7 @@ class ItemsCog(commands.Cog):
                 logger.warning("Item link unfurl failed for %s", item_id, exc_info=True)
                 continue
             try:
-                await message.channel.send(embed=build_item_embed(item))
+                await message.channel.send(embed=build_item_embed(item), view=item_link_view(item_id))
             except discord.HTTPException:
                 logger.warning("Failed to post item unfurl for %s in channel %s", item_id, message.channel.id)
 

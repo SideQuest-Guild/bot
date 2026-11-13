@@ -69,3 +69,16 @@ def user_line(user: discord.Member | discord.User) -> str:
 def truncate(text: str, limit: int = 1024) -> str:
     """Trim ``text`` to fit an embed field (default 1024 chars)."""
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def link_button(label: str, url: str) -> discord.ui.Button:
+    """A link-style button; needs no callback, so it works in views with any timeout, including none."""
+    return discord.ui.Button(style=discord.ButtonStyle.link, label=label, url=url)
+
+
+def link_view(*buttons: discord.ui.Button, timeout: float | None = None) -> discord.ui.View:
+    """A view holding only link buttons, in order."""
+    view = discord.ui.View(timeout=timeout)
+    for button in buttons:
+        view.add_item(button)
+    return view

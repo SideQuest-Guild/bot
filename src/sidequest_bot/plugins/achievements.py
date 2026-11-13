@@ -10,7 +10,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from http import HTTPStatus
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import discord
 from discord import app_commands
@@ -18,7 +18,7 @@ from discord.ext import commands
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
-from sidequest_bot.lib.embeds import Colors, make_embed, truncate
+from sidequest_bot.lib.embeds import Colors, link_button, link_view, make_embed, truncate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ACHIEVEMENT_PAGE_URL = "https://sidequest-guild.com/achievements/detail/?id={achievement_id}"
+ACHIEVEMENT_WOWHEAD_URL = "https://www.wowhead.com/forever/achievement={achievement_id}"
 DESCRIPTION_LIMIT = 4096
 MAX_AUTOCOMPLETE_RESULTS = 25
 MAX_OTHER_MATCHES = 5
@@ -54,12 +55,20 @@ def build_achievement_embed(achievement: AchievementSchema) -> discord.Embed:
         embed.add_field(name="Category", value=achievement.category)
     if achievement.reward_description:
         embed.add_field(name="Reward", value=truncate(achievement.reward_description), inline=False)
-    embed.add_field(
-        name="Site",
-        value=f"[View on site]({ACHIEVEMENT_PAGE_URL.format(achievement_id=achievement.id)})",
-        inline=False,
-    )
     return embed
+
+
+def achievement_link_buttons(achievement_id: int) -> list[discord.ui.Button]:
+    """Site + Wowhead link buttons for one achievement."""
+    return [
+        link_button("Site", ACHIEVEMENT_PAGE_URL.format(achievement_id=achievement_id)),
+        link_button("Wowhead", ACHIEVEMENT_WOWHEAD_URL.format(achievement_id=achievement_id)),
+    ]
+
+
+def achievement_link_view(achievement_id: int) -> discord.ui.View:
+    """A view holding just the achievement's link buttons, for replies with no other matches to offer."""
+    return link_view(*achievement_link_buttons(achievement_id))
 
 
 def match_option(match: AchievementSummary) -> discord.SelectOption:
@@ -150,16 +159,29 @@ class _AchievementMatchSelect(discord.ui.Select["AchievementMatchView"]):
         if isinstance(result, str):
             await interaction.response.send_message(result, ephemeral=True)
             return
-        await interaction.response.edit_message(embed=result, view=self.view)
+        view = cast("AchievementMatchView", self.view)
+        view.set_achievement(achievement_id)
+        await interaction.response.edit_message(embed=result, view=view)
 
 
 class AchievementMatchView(discord.ui.View):
-    """A select menu of up to :data:`MAX_OTHER_MATCHES` other search matches, swapping the shown embed on pick."""
+    """Link buttons for the shown achievement plus a select menu of up to :data:`MAX_OTHER_MATCHES` other matches.
 
-    def __init__(self, matches: Sequence[AchievementSummary]) -> None:
+    Picking another match swaps the shown embed and repoints the link buttons at it.
+    """
+
+    def __init__(self, achievement_id: int, matches: Sequence[AchievementSummary]) -> None:
         super().__init__(timeout=180)
+        self._site_button, self._wowhead_button = achievement_link_buttons(achievement_id)
         self._select = _AchievementMatchSelect(matches)
         self.add_item(self._select)
+        self.add_item(self._site_button)
+        self.add_item(self._wowhead_button)
+
+    def set_achievement(self, achievement_id: int) -> None:
+        """Repoint the link buttons at ``achievement_id``."""
+        self._site_button.url = ACHIEVEMENT_PAGE_URL.format(achievement_id=achievement_id)
+        self._wowhead_button.url = ACHIEVEMENT_WOWHEAD_URL.format(achievement_id=achievement_id)
 
 
 class AchievementsCog(commands.Cog):
@@ -179,7 +201,7 @@ class AchievementsCog(commands.Cog):
             if isinstance(result, str):
                 await interaction.followup.send(result, ephemeral=True)
                 return
-            await interaction.followup.send(embed=result)
+            await interaction.followup.send(embed=result, view=achievement_link_view(int(name)))
             return
         try:
             achievements = await _cache.get(self.bot.api)
@@ -205,9 +227,9 @@ class AchievementsCog(commands.Cog):
             await interaction.followup.send(result, ephemeral=True)
             return
         if others:
-            await interaction.followup.send(embed=result, view=AchievementMatchView(others))
+            await interaction.followup.send(embed=result, view=AchievementMatchView(best.id, others))
         else:
-            await interaction.followup.send(embed=result)
+            await interaction.followup.send(embed=result, view=achievement_link_view(best.id))
 
 
 async def setup(bot: SideQuestBot) -> None:

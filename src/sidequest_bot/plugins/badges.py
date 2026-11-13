@@ -33,7 +33,7 @@ from discord.ext import commands, tasks
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
-from sidequest_bot.lib.embeds import Colors, make_embed
+from sidequest_bot.lib.embeds import Colors, link_button, link_view, make_embed
 from sidequest_bot.lib.roles import grant_block_reason
 from sidequest_common.schemas import BadgeAck, GuildConfigUpdate
 from sidequest_common.schemas.badges import BADGE_LIST, BADGES, BadgeDefinition
@@ -95,8 +95,8 @@ def badge_grant_reason(badge_id: str) -> str:
     return f"Earned {name} on sidequest-guild.com"
 
 
-def build_badge_embed(announcement: PendingBadgeAnnouncement, profile_url: str, *, with_icon: bool) -> discord.Embed:
-    """Gold embed for one newly earned badge, with a link to the Hall of Heroes.
+def build_badge_embed(announcement: PendingBadgeAnnouncement, *, with_icon: bool) -> discord.Embed:
+    """Gold embed for one newly earned badge.
 
     ``with_icon``: the badge's image rides along as an attachment and shows as the thumbnail; otherwise the
     definition's emoji leads the title.
@@ -110,8 +110,12 @@ def build_badge_embed(announcement: PendingBadgeAnnouncement, profile_url: str, 
     )
     if with_icon:
         embed.set_thumbnail(url=f"attachment://{BADGE_ICON_FILENAME}")
-    embed.add_field(name="Hall of Heroes", value=f"[View the Hall of Heroes]({profile_url})", inline=False)
     return embed
+
+
+def build_badge_view(profile_url: str) -> discord.ui.View:
+    """A view holding the announcement's "Hall of Heroes" link button."""
+    return link_view(link_button("Hall of Heroes", profile_url))
 
 
 async def create_badge_role(guild: discord.Guild, badge: BadgeDefinition) -> discord.Role | None:
@@ -290,14 +294,13 @@ class BadgesCog(commands.Cog):
         self, guild: discord.Guild, channel: discord.TextChannel, announcement: PendingBadgeAnnouncement
     ) -> bool:
         icon = badge_icon(announcement.badge_id)
-        embed = build_badge_embed(
-            announcement, hall_of_heroes_url(_web_settings().BASE_URL), with_icon=icon is not None
-        )
+        embed = build_badge_embed(announcement, with_icon=icon is not None)
+        view = build_badge_view(hall_of_heroes_url(_web_settings().BASE_URL))
         mention_target = guild.get_member(announcement.discord_id) or discord.Object(id=announcement.discord_id)
         allowed = discord.AllowedMentions(users=[mention_target])
         files = [discord.File(io.BytesIO(icon), BADGE_ICON_FILENAME)] if icon is not None else []
         try:
-            await channel.send(embed=embed, files=files, allowed_mentions=allowed)
+            await channel.send(embed=embed, view=view, files=files, allowed_mentions=allowed)
         except discord.HTTPException:
             logger.warning(
                 "Failed to post badge announcement for %s in guild %s",

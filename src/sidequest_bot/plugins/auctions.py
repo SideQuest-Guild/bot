@@ -28,7 +28,7 @@ from sidequest_bot.api_client import (
     NotFoundError,
 )
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
-from sidequest_bot.lib.embeds import Colors, make_embed, truncate
+from sidequest_bot.lib.embeds import Colors, link_button, link_view, make_embed, truncate
 from sidequest_bot.plugins.items import ITEM_PAGE_URL, item_quality_color
 
 if TYPE_CHECKING:
@@ -94,11 +94,8 @@ def format_price(copper: int) -> str:
 def build_alert_embed(alert: AuctionAlertSchema) -> discord.Embed:
     """DM embed for one price alert: item name/link, price vs the member's max, quantity and house."""
     name = alert.item_name or f"Item {alert.item_id}"
-    embed = make_embed(
-        title=f"{name} is on sale",
-        description=f"[View on the site]({ITEM_PAGE_URL.format(item_id=alert.item_id)})",
-        color=Colors.GOLD,
-    )
+    embed = make_embed(title=f"{name} is on sale", color=Colors.GOLD)
+    embed.url = ITEM_PAGE_URL.format(item_id=alert.item_id)
     if alert.icon_url:
         embed.set_thumbnail(url=alert.icon_url)
     embed.add_field(
@@ -107,6 +104,11 @@ def build_alert_embed(alert: AuctionAlertSchema) -> discord.Embed:
     embed.add_field(name="Quantity", value=str(alert.quantity))
     embed.add_field(name="House", value=alert.house_name)
     return embed
+
+
+def build_alert_view(alert: AuctionAlertSchema) -> discord.ui.View:
+    """A view holding the DM's "View on the site" link button."""
+    return link_view(link_button("View on the site", ITEM_PAGE_URL.format(item_id=alert.item_id)))
 
 
 def build_price_embed(item: Item, price: ItemAuctionPrice) -> discord.Embed:
@@ -227,7 +229,7 @@ class AuctionsCog(commands.Cog):
             logger.info("Could not find Discord user %s for auction alert %s", alert.discord_user_id, alert.id)
         else:
             try:
-                await user.send(embed=build_alert_embed(alert))
+                await user.send(embed=build_alert_embed(alert), view=build_alert_view(alert))
             except discord.Forbidden:
                 logger.info("Could not DM auction alert to %s: DMs are closed", alert.discord_user_id)
             except discord.HTTPException:

@@ -208,7 +208,7 @@ class TestPlanRoleChanges:
         assert to_add == []
         assert to_remove == []
 
-    def test_npc_is_never_gated_and_loses_a_gate_role_they_hold(self) -> None:
+    def test_ledger_exempt_member_is_never_gated_and_loses_a_gate_role_they_hold(self) -> None:
         to_add, to_remove = plan_role_changes(
             {3},
             signed_in=False,
@@ -216,7 +216,7 @@ class TestPlanRoleChanges:
             linked_role_id=1,
             battlenet_role_id=2,
             gate_role_id=3,
-            npc=True,
+            ledger_exempt=True,
         )
         assert to_add == []
         assert to_remove == [3]
@@ -227,7 +227,7 @@ class TestPlanRoleChanges:
             linked_role_id=1,
             battlenet_role_id=2,
             gate_role_id=3,
-            npc=True,
+            ledger_exempt=True,
         )
         assert to_add == []
 
@@ -421,12 +421,13 @@ class TestSyncGuild:
         member.add_roles.assert_any_await(gate_role, reason="Hasn't signed in on sidequest-guild.com yet")
         member.remove_roles.assert_not_awaited()
 
-    async def test_removes_gate_role_from_an_npc_who_never_signed_in(self) -> None:
+    @pytest.mark.parametrize("role_name", ["NPC", "Familiar"])
+    async def test_removes_gate_role_from_an_npc_or_familiar_who_never_signed_in(self, role_name: str) -> None:
         gate_role = _fake_role(300)
-        npc_role = _fake_role(500)
-        npc_role.name = "NPC"
-        guild = _fake_guild(roles=[gate_role, npc_role])
-        member = _fake_member(1, roles=[gate_role, npc_role])
+        exempt_role = _fake_role(500)
+        exempt_role.name = role_name
+        guild = _fake_guild(roles=[gate_role, exempt_role])
+        member = _fake_member(1, roles=[gate_role, exempt_role])
         guild.members = [member]
         configs = AsyncMock()
         configs.get.return_value = _config(linked_role_id=None, battlenet_role_id=None, gate_role_id=300)
@@ -734,12 +735,13 @@ class TestListeners:
             await LinkRolesCog.on_member_update(cog, before, after)
         sync.assert_not_awaited()
 
-    async def test_on_member_update_syncs_the_moment_a_member_is_made_an_npc(self) -> None:
+    @pytest.mark.parametrize("role_name", ["npc", "FAMILIAR"])
+    async def test_on_member_update_syncs_the_moment_a_member_gets_an_exempt_role(self, role_name: str) -> None:
         cog = _make_cog()
-        npc_role = _fake_role(500)
-        npc_role.name = "npc"
+        exempt_role = _fake_role(500)
+        exempt_role.name = role_name
         before = _fake_member(1, roles=[])
-        after = _fake_member(1, roles=[npc_role])
+        after = _fake_member(1, roles=[exempt_role])
         with patch.object(cog, "_sync_member_now", AsyncMock()) as sync:
             await LinkRolesCog.on_member_update(cog, before, after)
             await LinkRolesCog.on_member_update(cog, after, after)  # any later update: nothing new

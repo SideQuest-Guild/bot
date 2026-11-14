@@ -8,14 +8,15 @@ having a site account drops both). The roster role (**New Arrival**) is wanted o
 in-game guild roster — by an officer, a Discord-only **Confirm in guild**, or automatically because one of their
 Battle.net characters is in the guild roster — regardless of whether they've ever signed in, but is never re-granted
 to a member who already holds a higher rank. The gate role (**At the Gate**) is wanted exactly while a member is
-NEITHER signed in NOR roster-confirmed: new members get it on join so they only see the sign-in channel, and it's
-removed the moment either condition is met. ``on_member_join``/screening-clear apply the same plan immediately so a
-new member doesn't wait up to a minute for their role. The same loop also applies every pending Discord role reset
-(``GET .../role-resets``): a member who deleted their site account gets every role the bot can manage stripped and
-the gate role (re)granted immediately, landing them back behind #sign-the-ledger. The moment a member is granted
-the site link role, they're DMed a one-time welcome (``guest_welcome.send_guest_welcome_dm``). The bot is the only
-thing that talks to Discord about these roles; the API only reports who is signed in/linked/confirmed/pending a
-reset.
+NEITHER signed in NOR roster-confirmed NOR an **NPC** (the hand-given role for friends who don't play, who never
+sign the ledger): new members get it on join so they only see the sign-in channel, and it's removed the moment any
+condition is met, including the moment an officer hands out NPC. ``on_member_join``/screening-clear apply the same
+plan immediately so a new member doesn't wait up to a minute for their role. The same loop also applies every
+pending Discord role reset (``GET .../role-resets``): a member who deleted their site account gets every role the
+bot can manage stripped and the gate role (re)granted immediately, landing them back behind #sign-the-ledger. The
+moment a member is granted the site link role, they're DMed a one-time welcome
+(``guest_welcome.send_guest_welcome_dm``). The bot is the only thing that talks to Discord about these roles; the
+API only reports who is signed in/linked/confirmed/pending a reset.
 """
 
 import logging
@@ -45,6 +46,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 60
+
+NPC_ROLE_NAME = "NPC"
+"""The hand-given role for friends who don't play the game (see ``roles_channel``): never gated behind the ledger.
+Looked up by name, like the other hand-given roles, since it isn't in the guild config."""
+
+
+def is_npc(roles: list[discord.Role]) -> bool:
+    """Whether one of ``roles`` is the NPC role."""
+    return any(role.name.casefold() == NPC_ROLE_NAME.casefold() for role in roles)
 
 
 @lru_cache(maxsize=1)
@@ -83,6 +93,7 @@ def plan_role_changes(
     roster_role_id: int | None = None,
     roster_confirmed: bool = False,
     ranked_above_roster_role: bool = False,
+    npc: bool = False,
 ) -> tuple[list[int], list[int]]:
     """Which of the four configured roles to add/remove for one member.
 
@@ -93,13 +104,20 @@ def plan_role_changes(
     automatically from the Battle.net guild roster — regardless of ``signed_in``, but is never (re-)granted to a
     member who ``ranked_above_roster_role`` already holds a higher rank (a promoted member who dropped the role
     must not get it back every minute), and the gate role is wanted exactly when the member is NEITHER
-    ``signed_in`` NOR ``roster_confirmed`` (added once they join with neither, removed the moment either is true).
+    ``signed_in`` NOR ``roster_confirmed`` NOR an ``npc`` (added once they join with none, removed the moment any
+    is true).
     """
     to_add: list[int] = []
     to_remove: list[int] = []
     _plan_role(linked_role_id, member_role_ids, to_add, to_remove, wants_role=signed_in)
     _plan_role(battlenet_role_id, member_role_ids, to_add, to_remove, wants_role=signed_in and battlenet_linked)
-    _plan_role(gate_role_id, member_role_ids, to_add, to_remove, wants_role=not signed_in and not roster_confirmed)
+    _plan_role(
+        gate_role_id,
+        member_role_ids,
+        to_add,
+        to_remove,
+        wants_role=not signed_in and not roster_confirmed and not npc,
+    )
     _plan_role(
         roster_role_id,
         member_role_ids,
@@ -215,6 +233,7 @@ class LinkRolesCog(commands.Cog):
             roster_role_id=config.roster_role_id,
             roster_confirmed=roster_confirmed,
             ranked_above_roster_role=self._ranked_above_roster_role(guild, config.roster_role_id, member),
+            npc=is_npc(member.roles),
         )
         if not to_add and not to_remove:
             return
@@ -325,10 +344,12 @@ class LinkRolesCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
-        """Apply the deferred plan once a pending member clears membership screening."""
-        if after.bot or not completed_screening(before_pending=before.pending, after_pending=after.pending):
+        """Apply the plan once a pending member clears membership screening, or the moment they're made an NPC."""
+        if after.bot:
             return
-        await self._sync_member_now(after)
+        made_npc = is_npc(after.roles) and not is_npc(before.roles)
+        if made_npc or completed_screening(before_pending=before.pending, after_pending=after.pending):
+            await self._sync_member_now(after)
 
     async def _sync_member_now(self, member: discord.Member) -> None:
         guild = member.guild

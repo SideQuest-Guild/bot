@@ -59,12 +59,12 @@ _RANK_ENTRIES: tuple[tuple[str, str], ...] = (
 )
 
 _HAND_GIVEN_ENTRIES: tuple[tuple[str, str], ...] = (
-    ("NPC", "Friends who don't play the game but want to be in the Discord."),
+    ("NPC", "Friends who don't play the game but want to be in the Discord. They skip #sign-the-ledger."),
     ("Familiar", "Automated or bot accounts."),
 )
 
 _AUTOMATIC_ROLE_ENTRIES: tuple[tuple[str, str], ...] = (
-    ("At the Gate", "In the server but hasn't signed in or been confirmed by a Quest Master yet."),
+    ("At the Gate", "In the server but hasn't signed in or been confirmed by a Quest Master yet (NPCs skip it)."),
     ("Signed the Ledger", "Signed in with Discord on the site."),
     ("Battle-Tagged", "Linked Battle.net on the account page."),
     ("Away on a Quest", "Marked away dates on the account page that include today."),

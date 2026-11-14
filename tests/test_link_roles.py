@@ -208,6 +208,29 @@ class TestPlanRoleChanges:
         assert to_add == []
         assert to_remove == []
 
+    def test_npc_is_never_gated_and_loses_a_gate_role_they_hold(self) -> None:
+        to_add, to_remove = plan_role_changes(
+            {3},
+            signed_in=False,
+            battlenet_linked=False,
+            linked_role_id=1,
+            battlenet_role_id=2,
+            gate_role_id=3,
+            npc=True,
+        )
+        assert to_add == []
+        assert to_remove == [3]
+        to_add, _ = plan_role_changes(
+            set(),
+            signed_in=False,
+            battlenet_linked=False,
+            linked_role_id=1,
+            battlenet_role_id=2,
+            gate_role_id=3,
+            npc=True,
+        )
+        assert to_add == []
+
     def test_gate_role_none_is_ignored(self) -> None:
         to_add, to_remove = plan_role_changes(
             set(),
@@ -397,6 +420,24 @@ class TestSyncGuild:
 
         member.add_roles.assert_any_await(gate_role, reason="Hasn't signed in on sidequest-guild.com yet")
         member.remove_roles.assert_not_awaited()
+
+    async def test_removes_gate_role_from_an_npc_who_never_signed_in(self) -> None:
+        gate_role = _fake_role(300)
+        npc_role = _fake_role(500)
+        npc_role.name = "NPC"
+        guild = _fake_guild(roles=[gate_role, npc_role])
+        member = _fake_member(1, roles=[gate_role, npc_role])
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=None, battlenet_role_id=None, gate_role_id=300)
+        api = AsyncMock()
+        api.list_member_links.return_value = []
+        cog = _make_cog(api=api, configs=configs)
+
+        await cog._sync_guild(guild)
+
+        member.add_roles.assert_not_awaited()
+        member.remove_roles.assert_awaited_once_with(gate_role, reason="Link roles sync")
 
     async def test_removes_gate_role_when_member_signs_in(self) -> None:
         gate_role = _fake_role(300)
@@ -692,6 +733,17 @@ class TestListeners:
         with patch.object(cog, "_sync_member_now", AsyncMock()) as sync:
             await LinkRolesCog.on_member_update(cog, before, after)
         sync.assert_not_awaited()
+
+    async def test_on_member_update_syncs_the_moment_a_member_is_made_an_npc(self) -> None:
+        cog = _make_cog()
+        npc_role = _fake_role(500)
+        npc_role.name = "npc"
+        before = _fake_member(1, roles=[])
+        after = _fake_member(1, roles=[npc_role])
+        with patch.object(cog, "_sync_member_now", AsyncMock()) as sync:
+            await LinkRolesCog.on_member_update(cog, before, after)
+            await LinkRolesCog.on_member_update(cog, after, after)  # any later update: nothing new
+        sync.assert_awaited_once_with(after)
 
     async def test_sync_member_now_marks_guild_non_site_on_404(self) -> None:
         guild = _fake_guild()

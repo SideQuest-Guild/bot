@@ -5,9 +5,12 @@ from uuid import uuid4
 
 import pytest
 
+from sidequest_bot.lib.instances import DUNGEONS_HIGH, DUNGEONS_LOW, RAIDS
 from sidequest_bot.plugins.group_finder import (
+    ActivityModal,
     CardContent,
     SpawnButton,
+    activity_name,
     allocate_group_number,
     build_card_content,
     build_open_voice_custom_id,
@@ -26,8 +29,9 @@ from sidequest_bot.plugins.group_finder import (
     slugify,
     tick_presence,
     tick_pug_minutes,
+    voice_status,
 )
-from sidequest_common.schemas import GROUP_KINDS, EventKind, SignupRole
+from sidequest_common.schemas import GROUP_KINDS, MAX_GROUP_NAME_LENGTH, EventKind, SignupRole
 
 
 class TestAllocateGroupNumber:
@@ -195,6 +199,34 @@ class TestRenameCooldownMinutes:
         now = datetime.now(UTC)
         old = [now - timedelta(minutes=30), now - timedelta(minutes=20)]
         assert rename_cooldown_minutes(old, now) == 0
+
+
+class TestActivity:
+    def test_typed_text_wins_over_picks(self) -> None:
+        assert activity_name("  Deadmines quests  ", ["The Deadmines"]) == "Deadmines quests"
+
+    def test_picks_are_joined_in_order(self) -> None:
+        assert activity_name("", ["Scarlet Monastery: Library", "Scarlet Monastery: Armory"]) == (
+            "Scarlet Monastery: Library + Scarlet Monastery: Armory"
+        )
+
+    def test_long_picks_are_cut_to_the_name_limit(self) -> None:
+        name = activity_name(
+            "", ["Scarlet Monastery: Graveyard", "Scarlet Monastery: Library", "Upper Blackrock Spire"]
+        )
+        assert len(name) == MAX_GROUP_NAME_LENGTH
+        assert name.endswith("…")
+
+    def test_nothing_picked_or_typed_is_empty(self) -> None:
+        assert activity_name("   ", []) == ""
+
+    def test_status_leads_with_the_group_kind(self) -> None:
+        assert voice_status(EventKind.RAID, "Onyxia's Lair") == "🐉 Onyxia's Lair"
+
+    def test_modal_fits_discord_limits(self) -> None:
+        # Discord rejects a select over 25 options or a modal over 5 components; either would break the button.
+        assert all(len(instances) <= 25 for instances in (DUNGEONS_LOW, DUNGEONS_HIGH, RAIDS))
+        assert len(ActivityModal(None, uuid4()).children) <= 5  # type: ignore[arg-type]
 
 
 def _card(**overrides: object) -> CardContent:

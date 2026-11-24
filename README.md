@@ -79,8 +79,10 @@ lives there.
 - **Group voice.** `#lfg` has one button per kind (Dungeon, Raid, World Boss, Leveling, PvP, Hangout). Click one and
   a voice channel opens right away, with a Join link and an **Add details** button to name it, add a note, flag
   needed roles, invite members, and ping the kind's opt-in role. A live card in `#lfg` shows who's in it. The
-  owner gets Rename, Set cap, Lock/Unlock, Transfer and End buttons in the channel's own chat; if the owner leaves,
-  the longest-present member takes over. A channel that stays empty for two minutes, or that nobody joins, goes away;
+  owner gets Set activity, Rename, Set cap, Lock/Unlock, Transfer and End buttons in the channel's own chat; if the
+  owner leaves, the longest-present member takes over. **Set activity** picks a dungeon or raid (or takes whatever you
+  type), and it shows as the voice channel's status under its name; a name typed in Add details or Rename shows there
+  too. A channel that stays empty for two minutes, or that nobody joins, goes away;
   its chat is kept for officers for 30 days. Every event thread and weekly-board card has an **Open voice** button that
   opens a group voice channel for that event, or links the one already open.
 - **PUG groups.** The **PUG group** button in `#lfg` asks what kind of group, then opens a `pug-raid-1` style voice

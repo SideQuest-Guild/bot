@@ -3,8 +3,10 @@
 A locked ``#lfg`` text channel holds one panel message with one button per :data:`GROUP_KINDS`. Clicking a button
 creates a voice channel right away (``dungeon-1``, ``raid-2``, ...) in the panel's category, with an ephemeral
 "Add details" follow-up to name it, add a note, flag needed roles, invite members, and ping the kind's opt-in role.
-A live card in ``#lfg`` tracks each group's headcount; owner controls (Rename, Set cap, Lock/Unlock, Transfer, End)
-live as buttons in the channel's own text chat. Every 60s the bot adds a minute to everyone present (and to every
+A live card in ``#lfg`` tracks each group's headcount; owner controls (Set activity, Rename, Set cap, Lock/Unlock,
+Transfer, End) live as buttons in the channel's own text chat. Whatever the group is doing (Set activity's pick, or
+the name typed in Add details or Rename) shows as the voice channel's status. Every 60s the bot adds a minute to
+everyone present (and to every
 pair present together, for "who groups with whom" stats) and pushes the running totals to the API every five
 minutes and at close. A channel empty (or never joined) for :data:`EMPTY_GRACE_SECONDS` is torn down: its chat is
 captured as a transcript, the session is closed with the API, its card is deleted, the channel is deleted, and a
@@ -51,6 +53,7 @@ from discord.http import Route
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.embeds import Colors
+from sidequest_bot.lib.instances import DUNGEONS_HIGH, DUNGEONS_LOW, RAIDS
 from sidequest_bot.plugins.welcome import autorole_block_reason
 from sidequest_common.schemas import (
     EMPTY_GRACE_SECONDS,
@@ -149,7 +152,7 @@ _BANNER = files("sidequest_bot") / "assets" / "lfg" / "banner.jpg"
 _UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _SPAWN_CUSTOM_ID_RE = re.compile(r"^sq:lfg:spawn:(?P<kind>[a-z_]+)$")
 _OWNER_CUSTOM_ID_RE = re.compile(
-    rf"^sq:lfg:owner:(?P<action>rename|cap|locktoggle|transfer|end):(?P<session_id>{_UUID_PATTERN})$"
+    rf"^sq:lfg:owner:(?P<action>activity|rename|cap|locktoggle|transfer|end):(?P<session_id>{_UUID_PATTERN})$"
 )
 _EVENT_CUSTOM_ID_RE = re.compile(rf"^sq:lfg:event:(?P<event_id>{_UUID_PATTERN})$")
 _PUG_CUSTOM_ID = "sq:lfg:pug"
@@ -281,6 +284,17 @@ def rename_cooldown_minutes(rename_times: Sequence[datetime], now: datetime) -> 
     oldest = min(recent)
     remaining = RENAME_WINDOW_SECONDS - (now - oldest).total_seconds()
     return max(1, math.ceil(remaining / 60))
+
+
+def activity_name(typed: str, picks: Sequence[str]) -> str:
+    """What the group is doing: the typed text if any, else the picked instances joined, cut to the name limit."""
+    name = typed.strip() or " + ".join(picks)
+    return name if len(name) <= MAX_GROUP_NAME_LENGTH else name[: MAX_GROUP_NAME_LENGTH - 1] + "…"
+
+
+def voice_status(kind: EventKind, name: str) -> str:
+    """The voice channel status for a group doing ``name``, e.g. ``🗝️ The Deadmines``."""
+    return f"{KIND_EMOJI[kind]} {name}"
 
 
 def pug_sweep_decision(
@@ -524,8 +538,9 @@ def build_panel_layout() -> discord.ui.LayoutView:
     container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
     container.add_item(
         discord.ui.TextDisplay(
-            "-# You get a **Join** link and an **Add details** button. The owner can rename, set a cap, lock, hand off "
-            "or end the group from its chat. Empty channels close after 2 minutes; group chat is kept 30 days for "
+            "-# You get a **Join** link and an **Add details** button. The owner can set what the group is running, "
+            "rename, set a cap, lock, hand off or end the group from its chat. Empty channels close after 2 minutes; "
+            "group chat is kept 30 days for "
             "officers."
         )
     )
@@ -562,14 +577,12 @@ def build_owner_controls_layout(
             "For the group's owner and officers. If the owner leaves, whoever has been here longest takes over."
         )
     )
-    container.add_item(
-        discord.ui.ActionRow(
-            *(
-                _in_layout(OwnerControlButton(session_id, action, locked=locked))
-                for action in ("rename", "cap", "locktoggle", "transfer", "end")
+    for actions in (("activity", "rename", "cap"), ("locktoggle", "transfer", "end")):
+        container.add_item(
+            discord.ui.ActionRow(
+                *(_in_layout(OwnerControlButton(session_id, action, locked=locked)) for action in actions)
             )
         )
-    )
     if invite_url is not None:
         container.add_item(discord.ui.TextDisplay(f"🌐 **Invite link for outside players:** {invite_url}"))
     container.add_item(
@@ -623,12 +636,16 @@ class OwnerControlButton(discord.ui.DynamicItem[discord.ui.Button], template=_OW
     """One owner-control button; state (the action and session) lives entirely in its ``custom_id``."""
 
     _LABELS: dict[str, tuple[str, str]] = {
+        "activity": ("Set activity", "📍"),
         "rename": ("Rename", "✏️"),
         "cap": ("Set cap", "👥"),
         "transfer": ("Transfer", "👑"),
         "end": ("End", "⏹️"),
     }
-    _STYLES: dict[str, discord.ButtonStyle] = {"end": discord.ButtonStyle.danger}
+    _STYLES: dict[str, discord.ButtonStyle] = {
+        "activity": discord.ButtonStyle.primary,
+        "end": discord.ButtonStyle.danger,
+    }
 
     def __init__(self, session_id: UUID, action: str, *, locked: bool = False) -> None:
         if action == "locktoggle":
@@ -818,6 +835,47 @@ class RenameModal(discord.ui.Modal, title="Rename group"):
         """Defer, then rename via the cog."""
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self.cog.rename_group(interaction, session_id=self.session_id, name=self.name_input.value)
+
+
+def _instance_select(instances: Sequence[str], placeholder: str, max_values: int) -> discord.ui.Select:
+    return discord.ui.Select(
+        placeholder=placeholder,
+        required=False,
+        min_values=0,
+        max_values=max_values,
+        options=[discord.SelectOption(label=name, value=name) for name in instances],
+    )
+
+
+class ActivityModal(discord.ui.Modal, title="What's the group doing?"):
+    """Owner control: pick a dungeon or raid, or type anything; it becomes the voice channel's status."""
+
+    def __init__(self, cog: GroupFinderCog, session_id: UUID) -> None:
+        super().__init__()
+        self.cog = cog
+        self.session_id = session_id
+        self.low_select = _instance_select(DUNGEONS_LOW, "Ragefire Chasm to The Drowned City", 3)
+        self.high_select = _instance_select(DUNGEONS_HIGH, "Uldaman to Scholomance", 3)
+        self.raid_select = _instance_select(RAIDS, "Hyjal Summit, Barrow Deeps, Onyxia's Lair", 1)
+        self.typed_input = discord.ui.TextInput(
+            max_length=MAX_GROUP_NAME_LENGTH, required=False, placeholder="Deadmines quests, then SFK"
+        )
+        self.add_item(discord.ui.Label(text="Dungeon (levels 13-40)", component=self.low_select))
+        self.add_item(discord.ui.Label(text="Dungeon (levels 37-60)", component=self.high_select))
+        self.add_item(discord.ui.Label(text="Raid", component=self.raid_select))
+        self.add_item(
+            discord.ui.Label(text="Or type it", description="Used instead of any pick", component=self.typed_input)
+        )
+
+    async def on_submit(self, interaction: discord.Interaction[SideQuestBot]) -> None:
+        """Defer, then set the activity via the cog."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        picks = [*self.low_select.values, *self.high_select.values, *self.raid_select.values]
+        name = activity_name(self.typed_input.value, picks)
+        if not name:
+            await interaction.followup.send("Pick a dungeon or raid, or type what you're doing.", ephemeral=True)
+            return
+        await self.cog.set_activity(interaction, session_id=self.session_id, name=name)
 
 
 class CapModal(discord.ui.Modal, title="Set voice user limit"):
@@ -1439,6 +1497,7 @@ class GroupFinderCog(commands.Cog):
                     live.rename_times.append(datetime.now(UTC))
             if name:
                 live.name = name
+                await self._set_voice_status(channel, live)
             await self._push_update(guild, live)
         await self._refresh_card(guild, live)
         mentions = [invitee for invitee in invited if not invitee.bot]
@@ -1465,7 +1524,9 @@ class GroupFinderCog(commands.Cog):
         ):
             await interaction.response.send_message("Only the group's owner can do that.", ephemeral=True)
             return
-        if action == "rename":
+        if action == "activity":
+            await interaction.response.send_modal(ActivityModal(self, session_id))
+        elif action == "rename":
             await interaction.response.send_modal(RenameModal(self, session_id))
         elif action == "cap":
             await interaction.response.send_modal(CapModal(self, session_id))
@@ -1549,9 +1610,53 @@ class GroupFinderCog(commands.Cog):
             live.channel_name = new_name
             live.name = name
             live.rename_times.append(datetime.now(UTC))
+            await self._set_voice_status(channel, live)
             await self._push_update(guild, live)
         await self._refresh_card(guild, live)
         await interaction.followup.send(f"Renamed to {new_name}.", ephemeral=True)
+
+    async def set_activity(
+        self, interaction: discord.Interaction[SideQuestBot], *, session_id: UUID, name: str
+    ) -> None:
+        """Owner control: show ``name`` as the group's activity, in the voice status and on its card.
+
+        The channel keeps its name: Discord allows only two renames per 10 minutes, and the status has no such limit.
+        """
+        guild = interaction.guild
+        live = self._groups.get(session_id)
+        if guild is None or live is None:
+            await interaction.followup.send("That group isn't live anymore.", ephemeral=True)
+            return
+        async with live.lock:
+            channel = guild.get_channel(live.channel_id)
+            if not isinstance(channel, discord.VoiceChannel):
+                await interaction.followup.send("That channel is gone.", ephemeral=True)
+                return
+            live.name = name
+            shown = await self._set_voice_status(channel, live)
+            await self._push_update(guild, live)
+        await self._refresh_card(guild, live)
+        reply = (
+            f"Activity set to **{name}**."
+            if shown
+            else (
+                f"Activity set to **{name}** on the group's card, but I couldn't set the channel status: I need the "
+                "Set Voice Channel Status permission."
+            )
+        )
+        await interaction.followup.send(reply, ephemeral=True)
+
+    @staticmethod
+    async def _set_voice_status(channel: discord.VoiceChannel, live: LiveGroup) -> bool:
+        """Show what ``live`` is doing as ``channel``'s voice status. False if Discord refused."""
+        if live.name is None:
+            return True
+        try:
+            await channel.edit(status=voice_status(live.kind, live.name), reason="LFG: group activity")
+        except discord.HTTPException:
+            logger.warning("Couldn't set the voice status of group channel %s", channel.id, exc_info=True)
+            return False
+        return True
 
     async def set_cap(self, interaction: discord.Interaction[SideQuestBot], *, session_id: UUID, cap: int) -> None:
         """Owner control: change the voice user limit (0 clears it)."""

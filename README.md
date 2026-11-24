@@ -61,6 +61,11 @@ lives there.
   lists; it shows how many recruits are invited, joined and qualified instead.
 - **WoW: Forever news.** Every five minutes the bot checks Blizzard's own forum posts about WoW: Forever and
   Wowhead's WoW: Forever news, and posts each new one in the feed channel with a link to the full post.
+- **Class halls.** Each class has a post in `#class-halls`, named like `Warrior Hall`. Picking a class role adds you
+  to its post and dropping the role takes you out. In each hall the bot posts and pins the guides the guild
+  recommends for that class (Method and Mobalytics, one button per guide), and edits that post when the list changes.
+  When Blizzard posts WoW: Forever hotfixes, each class's changes go to that class's hall as their own post, even if
+  no feed channel is set.
 - **Addons.** `#addons`, right below `#rules`, lists the community addons the guild recommends for WoW: Forever,
   grouped by who they're for (required for raids, suggested for raids, everyone, leveling, PvP), with a link to the
   full catalog on the website. The bot creates the channel the first time it has addons to show, keeps it read-only

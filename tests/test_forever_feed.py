@@ -6,6 +6,7 @@ import discord
 import httpx
 import respx
 
+from sidequest_bot.plugins.class_halls import ClassHallsCog
 from sidequest_bot.plugins.forever_feed import (
     FIRST_RUN_ITEMS,
     FORUMS_URL,
@@ -17,6 +18,7 @@ from sidequest_bot.plugins.forever_feed import (
     discourse_to_discord,
     first_image_url,
     is_forever_post,
+    parse_class_changes,
     parse_wowhead_rss,
     select_unposted,
 )
@@ -177,6 +179,7 @@ def _cog(http: httpx.AsyncClient | None = None) -> ForeverFeedCog:
     cog._http = http or httpx.AsyncClient()
     cog._category_is_forever = {}
     cog._blue_items = {}
+    cog._hall_posted = {}
     return cog
 
 
@@ -251,3 +254,147 @@ class TestFetchBlueItems:
     async def test_tracker_outage_yields_nothing_without_raising(self) -> None:
         respx.get(TRACKER_URL).mock(return_value=httpx.Response(503))
         assert await _cog()._fetch_blue_items() == []
+
+
+HOTFIX_RAW = """**November 17, 2026**
+
+**Classes**
+
+* Might of Stormwind and Warchief's Blessing should now always correctly cancel on death.
+* **Paladin**
+  * **Retribution**
+    * Two-Handed Weapon Specialization now increases all Holy Damage you deal.
+* **Shaman**
+  * Fixed an issue where Flurry incorrectly lost stacks.
+
+**Items**
+
+* Shadow Priests can now hold a Night Watchman's Torch.
+* **Paladin**
+  * Soulforge Armor now has Spell Power (was Strength).
+  * *Developers' notes: We are leaning more into Paladin tanks favoring Spell Power.*
+
+**Races**
+
+* **Tauren**
+  * Cultivation should now succeed more reliably.
+"""
+
+
+class TestParseClassChanges:
+    def test_collects_each_class_across_sections_and_skips_loose_mentions(self) -> None:
+        assert parse_class_changes(HOTFIX_RAW) == {
+            "Paladin": (
+                "**Classes**\n"
+                "* **Retribution**\n"
+                "  * Two-Handed Weapon Specialization now increases all Holy Damage you deal.\n\n"
+                "**Items**\n"
+                "* Soulforge Armor now has Spell Power (was Strength).\n"
+                "* *Developers' notes: We are leaning more into Paladin tanks favoring Spell Power.*"
+            ),
+            "Shaman": "**Classes**\n* Fixed an issue where Flurry incorrectly lost stacks.",
+        }
+
+    def test_post_without_class_bullets_has_no_changes(self) -> None:
+        assert parse_class_changes("**Quests**\n\n* **Shen'dralas**\n  * Pylons are shared.\n") == {}
+
+
+def _class_item(url: str, changes: dict[str, str]) -> FeedItem:
+    return FeedItem(
+        "blizzard",
+        url,
+        "WoW: Forever Hotfixes",
+        datetime.now(UTC) - timedelta(hours=1),
+        "",
+        "Blue post by Kaivax",
+        class_changes=tuple(changes.items()),
+    )
+
+
+def _thread(thread_id: int, history: list[SimpleNamespace]) -> MagicMock:
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = thread_id
+    thread.archived = False
+    reads: list[int] = []
+
+    async def _history(*, limit: int):
+        reads.append(limit)
+        for message in history:
+            yield message
+
+    thread.history = _history
+    thread.reads = reads
+    thread.send = AsyncMock()
+    return thread
+
+
+def _halls(halls: dict[str, MagicMock]) -> MagicMock:
+    cog = MagicMock(spec=ClassHallsCog)
+    cog.find_hall = AsyncMock(side_effect=lambda guild, name: halls.get(name))
+    cog.reopen = AsyncMock(return_value=True)
+    cog.has_halls.return_value = bool(halls)
+    return cog
+
+
+class TestPostClassChanges:
+    async def test_each_class_hall_gets_only_its_own_new_changes(self) -> None:
+        posted = _class_item("https://f/p/1", {"Paladin": "* Old fix."})
+        fresh = _class_item("https://f/p/2", {"Paladin": "* New fix.", "Mage": "* Frost fix."})
+        paladin = _thread(500, [_message(BOT_ID, ["https://f/p/1"])])
+        mage = _thread(501, [])
+        warrior = _thread(502, [])
+        cog = _cog()
+
+        await cog._post_class_changes(
+            _halls({"Paladin": paladin, "Mage": mage, "Warrior": warrior}),
+            MagicMock(),
+            [
+                posted,
+                fresh,
+            ],
+        )
+
+        paladin_embed = paladin.send.await_args.kwargs["embed"]
+        assert paladin.send.await_count == 1
+        assert (paladin_embed.url, paladin_embed.description, paladin_embed.author.name) == (
+            "https://f/p/2",
+            "* New fix.",
+            "Paladin changes",
+        )
+        assert mage.send.await_args.kwargs["embed"].description == "* Frost fix."
+        warrior.send.assert_not_awaited()
+
+    async def test_hall_history_is_read_once_and_nothing_posts_twice(self) -> None:
+        item = _class_item("https://f/p/3", {"Rogue": "* Shank fix."})
+        rogue = _thread(503, [])
+        halls = _halls({"Rogue": rogue})
+        cog = _cog()
+
+        await cog._post_class_changes(halls, MagicMock(), [item])
+        await cog._post_class_changes(halls, MagicMock(), [item])
+
+        assert rogue.send.await_count == 1
+        assert len(rogue.reads) == 1
+
+    @respx.mock  # Wowhead isn't mocked: reading it without a feed channel to post to would fail the test
+    async def test_halls_get_changes_without_a_feed_channel(self) -> None:
+        respx.get(TRACKER_URL).mock(
+            return_value=httpx.Response(
+                200, json={"posts": [_tracker_post(20, category_id=352, title="WoW: Forever Hotfixes")]}
+            )
+        )
+        respx.get(f"{FORUMS_URL}/c/352/show.json").mock(
+            return_value=httpx.Response(200, json={"category": {"slug": "wow-forever-bug-report"}})
+        )
+        respx.get(f"{FORUMS_URL}/posts/20.json").mock(
+            return_value=httpx.Response(200, json={"raw": HOTFIX_RAW, "cooked": ""})
+        )
+        shaman = _thread(504, [])
+        halls = _halls({"Shaman": shaman})
+        cog = _cog()
+        cog.bot = SimpleNamespace(user=SimpleNamespace(id=BOT_ID), guilds=[MagicMock()], get_cog=lambda _: halls)
+        cog._feed_channels = AsyncMock(return_value=[])
+
+        await cog._check_loop.coro(cog)
+
+        assert shaman.send.await_args.kwargs["embed"].url == f"{FORUMS_URL}/p/20"

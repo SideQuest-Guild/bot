@@ -11,6 +11,11 @@ Then, per guild, it posts every item from the last ``MAX_AGE`` whose link isn't 
 in that channel, oldest first. The channel itself is the record of what was posted, so restarts and redeploys never
 double-post and the API holds no feed state. A channel the bot has never posted in gets only the newest
 ``FIRST_RUN_ITEMS`` items rather than days of backlog.
+
+Blue posts also go, one class at a time, to the class halls (see ``class_halls``): Blizzard's hotfix posts list each
+class's changes as a nested list under a top-level ``* **<Class>**`` bullet, and each class's lists go to its hall
+as their own embed, whether or not the guild has a feed channel. A hall gets every item from the last ``MAX_AGE`` it
+doesn't have yet; its history is read once per run and remembered after that.
 """
 
 import html
@@ -30,7 +35,11 @@ from pydantic import BaseModel, ValidationError
 
 from sidequest_bot.api_client import APIError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
+from sidequest_bot.lib.class_guides import WOW_CLASSES
+from sidequest_bot.lib.embeds import DESCRIPTION_LIMIT as EMBED_DESCRIPTION_LIMIT
 from sidequest_bot.lib.embeds import Colors
+from sidequest_bot.plugins.characters import class_color
+from sidequest_bot.plugins.class_halls import ClassHallsCog
 from sidequest_common.schemas import GuildConfigUpdate
 
 if TYPE_CHECKING:
@@ -62,6 +71,10 @@ _BBCODE_RE: Final = re.compile(r"\[/?(?:quote|details|spoiler|center|left|right|
 _HTML_TAG_RE: Final = re.compile(r"</?(?:br|small|big|sup|sub|div|span|p|u|s|del|ins|font|center|kbd)\b[^>]*>")
 _HEADING_RE: Final = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t#]*$", re.MULTILINE)
 _BLANK_RUN_RE: Final = re.compile(r"\n{3,}")
+_SECTION_RE: Final = re.compile(r"^(?:#{1,6}[ \t]+(.+?)[ \t#]*|\*\*([^*\n]+)\*\*[ \t]*)$")
+"""An unindented heading or bold-only line, like ``**Classes**``: the start of a section of a hotfix post."""
+_CLASS_BULLET_RE: Final = re.compile(r"^[*-][ \t]+\*\*([^*\n]+)\*\*[ \t]*$")
+"""An unindented bullet that's only a bold name, like ``* **Paladin**``: the head of a nested list."""
 _IMG_TAG_RE: Final = re.compile(r"<img\b[^>]*>")
 _IMG_SRC_RE: Final = re.compile(r'\bsrc="(https://[^"]+)"')
 _IMG_CLASS_RE: Final = re.compile(r'\bclass="([^"]*)"')
@@ -85,6 +98,8 @@ class FeedItem:
     body: str
     byline: str
     image_url: str | None = None
+    class_changes: tuple[tuple[str, str], ...] = ()
+    """``(class, embed-ready changes)`` for each class the post has a section for, in post order."""
 
 
 class TrackerPost(BaseModel):
@@ -173,6 +188,40 @@ def first_image_url(cooked: str) -> str | None:
     return None
 
 
+def parse_class_changes(raw: str) -> dict[str, str]:
+    """Each class's changes in a hotfix post: the lists nested under every unindented ``* **<Class>**`` bullet.
+
+    A class can turn up in several sections (``**Classes**`` and ``**Items**``, say); its lists are joined in post
+    order, each under its section's bold name, children dedented one level. Loose mentions ("Shadow Priests can now
+    hold a torch") aren't sorted out: only the bullet structure Blizzard uses for class changes counts.
+    """
+    changes: dict[str, dict[str, list[str]]] = {}
+    section = ""
+    lines: list[str] | None = None
+    indent = 0
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        depth = len(line) - len(line.lstrip())
+        if depth:
+            if lines is not None:
+                indent = indent or depth
+                lines.append(line[min(indent, depth) :])
+            continue
+        lines = None
+        if header := _SECTION_RE.match(line):
+            section = (header[1] or header[2]).strip()
+        elif (bullet := _CLASS_BULLET_RE.match(line)) and (wow_class := bullet[1].strip()) in WOW_CLASSES:
+            lines = changes.setdefault(wow_class, {}).setdefault(section, [])
+            indent = 0
+    rendered: dict[str, str] = {}
+    for wow_class, sections in changes.items():
+        parts = ["\n".join([f"**{name}**", *body] if name else body) for name, body in sections.items() if body]
+        if parts:
+            rendered[wow_class] = "\n\n".join(parts)
+    return rendered
+
+
 def blue_post_item(post: TrackerPost, detail: PostDetail) -> FeedItem:
     """A tracker post plus its body as a ``FeedItem``, linked by the forum's ASCII ``/p/<id>`` short link."""
     return FeedItem(
@@ -183,6 +232,10 @@ def blue_post_item(post: TrackerPost, detail: PostDetail) -> FeedItem:
         body=discourse_to_discord(detail.raw),
         byline=f"Blue post by {post.name or post.username}",
         image_url=first_image_url(detail.cooked),
+        class_changes=tuple(
+            (wow_class, discourse_to_discord(changes, EMBED_DESCRIPTION_LIMIT))
+            for wow_class, changes in parse_class_changes(detail.raw).items()
+        ),
     )
 
 
@@ -251,6 +304,20 @@ def build_item_embed(item: FeedItem) -> discord.Embed:
     return embed
 
 
+def build_class_change_embed(item: FeedItem, wow_class: str, changes: str) -> discord.Embed:
+    """One post's changes for one class, in the class's color; the title links to the full post."""
+    embed = discord.Embed(
+        title=clip(item.title, TITLE_LIMIT),
+        url=item.url,
+        description=changes,
+        colour=class_color(wow_class.lower()),
+        timestamp=item.published_at,
+    )
+    embed.set_author(name=f"{wow_class} changes")
+    embed.set_footer(text=item.byline)
+    return embed
+
+
 class ForeverFeedCog(commands.Cog):
     """Periodic WoW: Forever news poll, posting new items to each guild's ``forever_feed_channel_id``."""
 
@@ -267,6 +334,8 @@ class ForeverFeedCog(commands.Cog):
         self._category_is_forever: dict[int, bool] = {}
         self._blue_items: dict[int, FeedItem] = {}
         """Rendered blue posts by post id, so each body is fetched once; pruned to what the tracker still lists."""
+        self._hall_posted: dict[int, set[str]] = {}
+        """Links already in each hall thread, by thread id: read from its history once, then kept here."""
         self._check_loop.start()
 
     async def cog_unload(self) -> None:
@@ -296,15 +365,25 @@ class ForeverFeedCog(commands.Cog):
     @tasks.loop(seconds=CHECK_INTERVAL_SECONDS)
     async def _check_loop(self) -> None:
         channels = await self._feed_channels()
-        if not channels:
+        halls = self.bot.get_cog("ClassHallsCog")
+        hall_guilds = (
+            [guild for guild in self.bot.guilds if halls.has_halls(guild.id)]
+            if isinstance(halls, ClassHallsCog)
+            else []
+        )
+        if not channels and not hall_guilds:
             return
-        items = [*await self._fetch_blue_items(), *await self._fetch_wowhead_items()]
+        blue_items = await self._fetch_blue_items()
+        items = [*blue_items, *await self._fetch_wowhead_items()] if channels else blue_items
         for channel in channels:
             try:
                 await self._post_new(channel, items)
             except discord.HTTPException:
                 # Must not escape: an unhandled exception stops a tasks.loop for good. Retried next tick.
                 logger.warning("Forever feed post failed in channel %s", channel.id, exc_info=True)
+        if isinstance(halls, ClassHallsCog):
+            for guild in hall_guilds:
+                await self._post_class_changes(halls, guild, blue_items)
 
     @_check_loop.before_loop
     async def _before_check_loop(self) -> None:
@@ -388,6 +467,40 @@ class ForeverFeedCog(commands.Cog):
             posted_urls.update(embed.url for embed in message.embeds if embed.url)
         for item in select_unposted(items, posted_urls, has_history=has_history, now=datetime.now(UTC)):
             await channel.send(embed=build_item_embed(item))
+
+    async def _post_class_changes(self, halls: ClassHallsCog, guild: discord.Guild, items: Sequence[FeedItem]) -> None:
+        """Each item's class sections into that class's hall in ``guild``, oldest first, skipping what's there."""
+        now = datetime.now(UTC)
+        for wow_class in WOW_CLASSES:
+            changes = {item.url: text for item in items for name, text in item.class_changes if name == wow_class}
+            if not changes or (hall := await halls.find_hall(guild, wow_class)) is None:
+                continue
+            try:
+                posted = await self._hall_posted_urls(hall)
+                fresh = select_unposted((i for i in items if i.url in changes), posted, has_history=True, now=now)
+                if not fresh or not await halls.reopen(hall):
+                    continue
+                for item in fresh:
+                    await hall.send(embed=build_class_change_embed(item, wow_class, changes[item.url]))
+                    posted.add(item.url)
+            except discord.HTTPException:
+                # Must not escape the loop either; whatever didn't post is retried next tick.
+                logger.warning("Class changes post failed in hall %s", hall.id, exc_info=True)
+
+    async def _hall_posted_urls(self, hall: discord.Thread) -> set[str]:
+        """Links the bot has posted in ``hall``: its recent history the first time, the remembered set after."""
+        posted = self._hall_posted.get(hall.id)
+        if posted is None:
+            bot_id = self.bot.user.id if self.bot.user else None
+            posted = {
+                embed.url
+                async for message in hall.history(limit=HISTORY_LIMIT)
+                if message.author.id == bot_id
+                for embed in message.embeds
+                if embed.url
+            }
+            self._hall_posted[hall.id] = posted
+        return posted
 
 
 async def setup(bot: SideQuestBot) -> None:

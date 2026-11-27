@@ -9,6 +9,8 @@ import discord
 
 from sidequest_bot.api_client import APIError, SimChange, SimComparison, SimItem, SimJob, SimMetrics, SimResult, SimRow
 from sidequest_bot.plugins.sim import (
+    FORUM_NAME,
+    POST_NAME,
     USAGE,
     ParsedSim,
     SimCog,
@@ -284,74 +286,128 @@ class TestFormatSimResults:
 # --- cog behavior
 
 
-def _forum(name: str = "sim") -> MagicMock:
+def _forum(name: str = FORUM_NAME, threads: list | None = None, archived: list | None = None) -> MagicMock:
     forum = MagicMock(spec=discord.ForumChannel)
     forum.name = name
-    forum.topic = None
+    forum.threads = threads or []
+    forum.create_thread = AsyncMock()
+
+    async def _archived(**_kwargs: object):
+        for thread in archived or []:
+            yield thread
+
+    forum.archived_threads = _archived
     return forum
 
 
-def _thread(parent: MagicMock, *, owner_id: int = 1, thread_id: int = 100) -> MagicMock:
-    thread = MagicMock(spec=discord.Thread)
-    thread.id = thread_id
-    thread.parent = parent
-    thread.owner_id = owner_id
-    thread.guild = SimpleNamespace(id=42)
-    thread.send = AsyncMock()
-    thread.starter_message = None
-    thread.fetch_message = AsyncMock()
-    return thread
+def _post(parent: MagicMock, *, name: str = POST_NAME, archived: bool = False) -> MagicMock:
+    post = MagicMock(spec=discord.Thread)
+    post.id = 100
+    post.name = name
+    post.parent = parent
+    post.archived = archived
+    post.edit = AsyncMock()
+    return post
 
 
-def _cog(api: object) -> SimCog:
+def _message(
+    channel: object, content: str, *, author_id: int = 7, bot: bool = False, message_id: int = 500
+) -> MagicMock:
+    message = MagicMock(spec=discord.Message)
+    message.id = message_id
+    message.channel = channel
+    message.content = content
+    message.author = SimpleNamespace(id=author_id, bot=bot)
+    message.guild = SimpleNamespace(id=42)
+    message.reply = AsyncMock()
+    return message
+
+
+def _cog(api: object, guilds: list | None = None) -> SimCog:
     cog = SimCog.__new__(SimCog)
-    cog.bot = SimpleNamespace(api=api, guilds=[])
-    cog._polls = {}
+    cog.bot = SimpleNamespace(api=api, guilds=guilds or [])
+    cog._polls = set()
     return cog
 
 
-async def test_on_thread_create_ignores_other_forums() -> None:
-    cog = _cog(AsyncMock())
-    thread = _thread(_forum("other"))
-    await SimCog.on_thread_create(cog, thread)
-    thread.send.assert_not_called()
-
-
-async def test_on_thread_create_sends_usage_on_bad_post() -> None:
-    cog = _cog(AsyncMock())
-    thread = _thread(_forum())
-    thread.starter_message = SimpleNamespace(content="")
-    await SimCog.on_thread_create(cog, thread)
-    thread.send.assert_awaited_once()
-    assert thread.send.await_args.args[0] == USAGE
-
-
-async def test_handle_queues_a_sim_and_posts_results() -> None:
-    job_id = uuid4()
-    queued = SimJob(id=job_id, status="queued", position=1, created_at=datetime.now(UTC))
-    done = SimJob(id=job_id, status="done", result=_result(), created_at=datetime.now(UTC))
+async def test_messages_outside_the_sim_post_are_ignored() -> None:
     api = AsyncMock()
-    api.create_sim_job.return_value = queued
-    api.get_sim_job.return_value = done
     cog = _cog(api)
+    for channel in (_post(_forum(), name="Paladin Hall"), _post(_forum("events"))):
+        message = _message(channel, "Nox Zul\nSeal of Rivendare")
+        await SimCog.on_message(cog, message)
+        message.reply.assert_not_called()
+    api.create_sim_job.assert_not_called()
 
+
+async def test_the_posts_own_first_message_and_bot_messages_are_ignored() -> None:
+    cog = _cog(AsyncMock())
+    post = _post(_forum())
+    for message in (_message(post, USAGE, message_id=post.id), _message(post, "Nox Zul\nSeal of Rivendare", bot=True)):
+        await SimCog.on_message(cog, message)
+        message.reply.assert_not_called()
+
+
+async def test_a_message_without_items_gets_the_usage() -> None:
+    cog = _cog(AsyncMock())
+    message = _message(_post(_forum()), "")
+    await SimCog.on_message(cog, message)
+    assert message.reply.await_args.args[0] == USAGE
+
+
+async def test_a_message_is_queued_for_its_author_and_answered_with_results() -> None:
+    job_id = uuid4()
+    api = AsyncMock()
+    api.create_sim_job.return_value = SimJob(id=job_id, status="queued", position=1, created_at=datetime.now(UTC))
+    api.get_sim_job.return_value = SimJob(id=job_id, status="done", result=_result(), created_at=datetime.now(UTC))
+    cog = _cog(api)
     reply = MagicMock()
     reply.edit = AsyncMock()
-    thread = _thread(_forum())
-    thread.send.return_value = reply
+    message = _message(_post(_forum()), "Nox Zul\nSeal of Rivendare", author_id=7)
+    message.reply.return_value = reply
 
-    async def _run() -> None:
-        await cog._handle(thread, "Nox Zul\nSeal of Rivendare", owner_id=1)
-        await cog._polls[thread.id]
+    await SimCog.on_message(cog, message)
+    for task in list(cog._polls):
+        await task
 
-    await _run()
-
-    api.create_sim_job.assert_awaited_once()
-    request = api.create_sim_job.await_args.args[1]
+    guild_id, request = api.create_sim_job.await_args.args
+    assert guild_id == 42
     assert request.character == "Nox Zul"
-    assert request.requested_by == "1"
-    reply.edit.assert_awaited()
-    assert "Nox Zul" in reply.edit.await_args.kwargs["content"]
+    assert request.requested_by == "7"
+    assert "Seal of Rivendare" in reply.edit.await_args.kwargs["content"]
+
+
+async def test_sweep_creates_the_post_with_the_usage_when_missing() -> None:
+    forum = _forum()
+    cog = _cog(AsyncMock(), guilds=[SimpleNamespace(id=42, forums=[forum])])
+    await SimCog._post_sweep.coro(cog)
+    forum.create_thread.assert_awaited_once_with(name=POST_NAME, content=USAGE)
+
+
+async def test_sweep_reopens_an_archived_post_instead_of_making_another() -> None:
+    forum = _forum()
+    archived = _post(forum, archived=True)
+    forum.archived_threads = _forum(archived=[archived]).archived_threads
+    cog = _cog(AsyncMock(), guilds=[SimpleNamespace(id=42, forums=[forum])])
+    await SimCog._post_sweep.coro(cog)
+    forum.create_thread.assert_not_called()
+    archived.edit.assert_awaited_once_with(archived=False)
+
+
+def _request() -> object:
+    return build_request(
+        ParsedSim(
+            character="Nox Zul",
+            swaps=[SimItem(item="Seal of Rivendare")],
+            wearing=[],
+            spec=None,
+            talents=None,
+            targets=[1, 4],
+            mobs=["humanoid"],
+            duration=90,
+        ),
+        requested_by=1,
+    )
 
 
 async def test_poll_reports_a_queue_error() -> None:
@@ -360,48 +416,17 @@ async def test_poll_reports_a_queue_error() -> None:
     cog = _cog(api)
     reply = MagicMock()
     reply.edit = AsyncMock()
-    thread = _thread(_forum())
-
-    request = build_request(
-        ParsedSim(
-            character="Nox Zul",
-            swaps=[SimItem(item="Seal of Rivendare")],
-            wearing=[],
-            spec=None,
-            talents=None,
-            targets=[1, 4],
-            mobs=["humanoid"],
-            duration=90,
-        ),
-        requested_by=1,
-    )
-    await cog._poll(thread, reply, request)
+    await cog._poll(_message(_post(_forum()), ""), reply, _request())
     reply.edit.assert_awaited_once_with(content="Couldn't queue that sim: Unknown character 'Nox Zul'.")
 
 
 async def test_poll_reports_a_failed_sim() -> None:
-    job_id = uuid4()
     api = AsyncMock()
     api.create_sim_job.return_value = SimJob(
-        id=job_id, status="failed", error="wowsimcli exited 1", created_at=datetime.now(UTC)
+        id=uuid4(), status="failed", error="wowsimcli exited 1", created_at=datetime.now(UTC)
     )
     cog = _cog(api)
     reply = MagicMock()
     reply.edit = AsyncMock()
-    thread = _thread(_forum())
-
-    request = build_request(
-        ParsedSim(
-            character="Nox Zul",
-            swaps=[SimItem(item="Seal of Rivendare")],
-            wearing=[],
-            spec=None,
-            talents=None,
-            targets=[1, 4],
-            mobs=["humanoid"],
-            duration=90,
-        ),
-        requested_by=1,
-    )
-    await cog._poll(thread, reply, request)
+    await cog._poll(_message(_post(_forum()), ""), reply, _request())
     reply.edit.assert_awaited_once_with(content="That sim failed: wowsimcli exited 1")

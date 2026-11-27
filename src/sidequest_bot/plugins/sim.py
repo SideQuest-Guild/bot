@@ -1,25 +1,22 @@
-"""Gear-swap sims: a "sim" forum post names a character and up to six items, the bot queues a sim through the API.
+"""Gear-swap sims: messages in the "Gear sims" post of the ``#class-halls`` forum queue a sim through the API.
 
-A member starts a post in the forum channel named ``"sim"`` (any category). The starter message's first line is
-the character's name and surname (``Nox Zul``); every following line is either an item to try (a Wowhead link, a
-numeric item id, or an item name, optionally prefixed ``slot: `` and suffixed `` +Enchant Name``) or one of the
-option lines documented in :data:`USAGE` (``targets:``, ``mobs:``, ``duration:``, ``spec:``, ``talents:``,
-``wearing:``). The bot never resolves item text itself — the API's character/item/spec validation is the single
-source of truth, and its plain-English 400/429 ``detail`` is relayed verbatim.
+The bot keeps one post named :data:`POST_NAME` in the forum named :data:`FORUM_NAME` (the class halls), creating it
+with :data:`USAGE` as its first message when it's missing and reopening it when Discord archives it. Every member
+message in that post is a sim request: its first line is the character's name and surname (``Nox Zul``); every
+following line is either an item to try (a Wowhead link, a numeric item id, or an item name, optionally prefixed
+``slot: `` and suffixed `` +Enchant Name``) or one of the option lines documented in :data:`USAGE` (``targets:``,
+``mobs:``, ``duration:``, ``spec:``, ``talents:``, ``wearing:``). The bot never resolves item text itself: the API's
+character/item/spec validation is the single source of truth, and its plain-English 400/429 ``detail`` is relayed
+verbatim.
 
-The sim site has no "what's my linked character" route yet (only an event-scoped signup lookup), so a post that
-omits the character line always gets the usage reply rather than guessing; the first agent to add a generic
-by-Discord-id character lookup should wire it in here as ``default_character``.
+The sim site has no "what's my linked character" route yet (only an event-scoped signup lookup), so a message that
+omits the character line gets the usage reply rather than a guess; a by-Discord-id character lookup would plug in
+here as ``default_character``.
 
-The bot replies "Simming…" right away, then polls ``GET .../sims/{id}`` every 5s for up to 5 minutes, editing that
-reply with the queue position and, once done, the first chunk of the results (further chunks, if the tables don't
-fit in one 2000-char message, post as new thread messages). A later message from the thread's owner re-parses and
-re-runs the sim, cancelling any poll still in flight for that thread. Errors the API reports (unknown character,
-ambiguous item, unsupported spec, the 429 queue limit) are replied in the thread verbatim.
-
-The forum's own "Post Guidelines" (its channel topic, shown to posters starting a new thread) are set to
-:data:`USAGE` once, the first time the bot finds the forum with no topic set; an officer who customizes it afterwards
-is never overwritten.
+The bot replies to the message with "Simming…" right away, then polls ``GET .../sims/{id}`` every 5s for up to 5
+minutes, editing that reply with the queue position and, once done, the first chunk of the results (further chunks,
+if the tables don't fit in one 2000-char message, follow as more replies). Errors the API reports (unknown
+character, ambiguous item, unsupported spec, the 429 queue limit) are replied verbatim.
 """
 
 import asyncio
@@ -52,11 +49,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FORUM_NAME = "sim"
+FORUM_NAME = "class-halls"
+POST_NAME = "Gear sims"
 SWEEP_INTERVAL_HOURS = 6
 POLL_INTERVAL_SECONDS = 5
 POLL_TIMEOUT_SECONDS = 300
-STARTER_RETRY_SECONDS = 2
 DISCORD_MESSAGE_LIMIT = 2000
 
 USAGE = (
@@ -77,7 +74,7 @@ USAGE = (
     "- `targets: 1, 4` · `mobs: humanoid, undead` · `duration: 120` · `spec: feralbear` (druids: feralcat or "
     "feralbear)\n"
     "The sim models level 60 (55+ is close enough). Healers, enhancement shamans and warlocks can't be simmed yet.\n"
-    "Post again in your thread to re-run with new text."
+    "Post a new message here to sim again."
 )
 
 _OPTION_KEYS = ("targets", "mobs", "duration", "spec", "talents", "wearing")
@@ -313,90 +310,76 @@ def format_sim_results(result: SimResult) -> list[str]:
 
 
 class SimCog(commands.Cog):
-    """Watches the ``sim`` forum, queues sims through the API, and posts their results tables."""
+    """Keeps the "Gear sims" post in the class halls, queues each message there as a sim, and replies with results."""
 
     def __init__(self, bot: SideQuestBot) -> None:
         self.bot = bot
-        self._polls: dict[int, asyncio.Task[None]] = {}
-        self._guideline_sweep.start()
+        self._polls: set[asyncio.Task[None]] = set()
+        self._post_sweep.start()
 
     async def cog_unload(self) -> None:
-        """Stop the guideline sweep and cancel any sims still being polled."""
-        self._guideline_sweep.cancel()
-        for task in self._polls.values():
+        """Stop the post sweep and cancel any sims still being polled."""
+        self._post_sweep.cancel()
+        for task in self._polls:
             task.cancel()
 
     @staticmethod
-    def _find_forum(guild: discord.Guild) -> discord.ForumChannel | None:
-        return discord.utils.get(guild.forums, name=FORUM_NAME)
+    def is_sim_post(channel: object) -> bool:
+        """Whether ``channel`` is the "Gear sims" post in the class-halls forum."""
+        return (
+            isinstance(channel, discord.Thread)
+            and channel.name == POST_NAME
+            and isinstance(channel.parent, discord.ForumChannel)
+            and channel.parent.name == FORUM_NAME
+        )
 
     @staticmethod
-    def _is_sim_thread(thread: discord.Thread) -> bool:
-        return isinstance(thread.parent, discord.ForumChannel) and thread.parent.name == FORUM_NAME
+    async def _find_post(forum: discord.ForumChannel) -> discord.Thread | None:
+        post = discord.utils.get(forum.threads, name=POST_NAME)
+        if post is not None:
+            return post
+        async for thread in forum.archived_threads(limit=None):
+            if thread.name == POST_NAME:
+                return thread
+        return None
 
     @tasks.loop(hours=SWEEP_INTERVAL_HOURS)
-    async def _guideline_sweep(self) -> None:
-        """Set the sim forum's post guidelines to :data:`USAGE` the first time it's found with none set."""
+    async def _post_sweep(self) -> None:
+        """Create the "Gear sims" post with :data:`USAGE` where it's missing, and reopen it if it was archived."""
         for guild in self.bot.guilds:
-            forum = self._find_forum(guild)
-            if forum is None or forum.topic:
+            forum = discord.utils.get(guild.forums, name=FORUM_NAME)
+            if forum is None:
                 continue
             try:
-                await forum.edit(topic=USAGE)
+                post = await self._find_post(forum)
+                if post is None:
+                    await forum.create_thread(name=POST_NAME, content=USAGE)
+                elif post.archived:
+                    await post.edit(archived=False)
             except discord.HTTPException:
-                logger.warning("Couldn't set sim forum guidelines in guild %s", guild.id, exc_info=True)
+                logger.warning("Couldn't keep the %s post in guild %s", POST_NAME, guild.id, exc_info=True)
 
-    @_guideline_sweep.before_loop
+    @_post_sweep.before_loop
     async def _before_sweep(self) -> None:
         await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
-    async def on_thread_create(self, thread: discord.Thread) -> None:
-        """Parse a new sim post's starter message and queue it."""
-        if not self._is_sim_thread(thread):
-            return
-        starter = thread.starter_message
-        for attempt in range(2):  # the starter post can lag the thread-create event by a moment
-            if starter is not None:
-                break
-            try:
-                starter = await thread.fetch_message(thread.id)
-            except discord.NotFound:
-                if attempt == 0:
-                    await asyncio.sleep(STARTER_RETRY_SECONDS)
-            except discord.HTTPException:
-                break
-        if starter is None:
-            logger.warning("Couldn't read the starter post for sim thread %s", thread.id)
-            return
-        await self._handle(thread, starter.content, thread.owner_id)
-
-    @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """Re-run a sim thread when its owner posts a follow-up message."""
-        if message.author.bot or not isinstance(message.channel, discord.Thread):
+        """Sim a member's message in the "Gear sims" post (the post's own first message is the usage text)."""
+        if message.author.bot or not self.is_sim_post(message.channel) or message.id == message.channel.id:
             return
-        thread = message.channel
-        if not self._is_sim_thread(thread) or message.id == thread.id or message.author.id != thread.owner_id:
-            return
-        await self._handle(thread, message.content, thread.owner_id)
-
-    async def _handle(self, thread: discord.Thread, content: str, owner_id: int | None) -> None:
-        parsed = parse_sim_post(content, default_character=None)
+        parsed = parse_sim_post(message.content, default_character=None)
         if isinstance(parsed, str):
-            await thread.send(parsed)
+            await message.reply(parsed, mention_author=False)
             return
-        request = build_request(parsed, requested_by=owner_id)
-        reply = await thread.send("Simming…")
-        previous = self._polls.get(thread.id)
-        if previous is not None and not previous.done():
-            previous.cancel()
-        task = asyncio.create_task(self._poll(thread, reply, request))
-        self._polls[thread.id] = task
-        task.add_done_callback(lambda _task, thread_id=thread.id: self._polls.pop(thread_id, None))
+        reply = await message.reply("Simming…", mention_author=False)
+        request = build_request(parsed, requested_by=message.author.id)
+        task = asyncio.create_task(self._poll(message, reply, request))
+        self._polls.add(task)
+        task.add_done_callback(self._polls.discard)
 
-    async def _poll(self, thread: discord.Thread, reply: discord.Message, request: SimRequest) -> None:
-        guild_id = thread.guild.id
+    async def _poll(self, message: discord.Message, reply: discord.Message, request: SimRequest) -> None:
+        guild_id = message.guild.id if message.guild else 0
         try:
             job = await self.bot.api.create_sim_job(guild_id, request)
         except APIError as exc:
@@ -406,7 +389,7 @@ class SimCog(commands.Cog):
         deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
         while True:
             if job.status == "done" and job.result is not None:
-                await self._post_results(thread, reply, job.result)
+                await self._post_results(message, reply, job.result)
                 return
             if job.status == "failed":
                 await reply.edit(content=f"That sim failed: {job.error or 'unknown error'}")
@@ -425,11 +408,11 @@ class SimCog(commands.Cog):
                 await reply.edit(content=f"Simming…{position}")
 
     @staticmethod
-    async def _post_results(thread: discord.Thread, reply: discord.Message, result: SimResult) -> None:
+    async def _post_results(message: discord.Message, reply: discord.Message, result: SimResult) -> None:
         chunks = format_sim_results(result)
         await reply.edit(content=chunks[0])
         for chunk in chunks[1:]:
-            await thread.send(chunk)
+            await message.reply(chunk, mention_author=False)
 
 
 async def setup(bot: SideQuestBot) -> None:

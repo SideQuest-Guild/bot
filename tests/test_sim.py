@@ -224,7 +224,10 @@ class TestFormatSimResults:
         assert len(chunks) == 1
         text = chunks[0]
         assert "Nox Zul" in text
-        assert "Old Ring → Seal of Rivendare" in text
+        assert (
+            "[Old Ring](<https://www.wowhead.com/forever/item=1>) → "
+            "[Seal of Rivendare](<https://www.wowhead.com/forever/item=2>)"
+        ) in text
         assert "Option 1" not in text  # one comparison: no option headings
         table = text.split("```")[1]
         header, first, second = table.strip().splitlines()[:3]

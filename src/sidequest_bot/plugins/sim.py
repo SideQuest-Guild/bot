@@ -40,9 +40,11 @@ from sidequest_bot.api_client import (
     SimItem,
     SimRequest,
     SimResult,
+    SimResultItem,
     SimRow,
 )
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
+from sidequest_bot.plugins.items import WOWHEAD_URL
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -231,10 +233,15 @@ def build_request(parsed: ParsedSim, *, requested_by: int | None) -> SimRequest:
     )
 
 
+def _item_link(item: SimResultItem) -> str:
+    """The item's name linked to its Wowhead page; ``<>`` keeps Discord from adding a preview card per link."""
+    return f"[{item.name}](<{WOWHEAD_URL.format(item_id=item.id)}>)"
+
+
 def format_change(change: SimChange) -> str:
-    """One slot's before/after item, e.g. ``**chest**: Breastplate of Valor → Breastplate of Annihilation``."""
-    from_name = change.from_item.name if change.from_item else "—"
-    return f"**{change.slot}**: {from_name} → {change.to_item.name}"
+    """One slot's before/after item, each linked to Wowhead: ``**chest**: [Old](<url>) → [New](<url>)``."""
+    from_name = _item_link(change.from_item) if change.from_item else "—"
+    return f"**{change.slot}**: {from_name} → {_item_link(change.to_item)}"
 
 
 def _delta_cell(row: SimRow, key: str) -> str:

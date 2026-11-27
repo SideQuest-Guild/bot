@@ -3,7 +3,7 @@
 import logging
 from datetime import date, datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 from uuid import UUID
 
 import httpx
@@ -373,6 +373,144 @@ class AuctionAlertSchema(BaseModel):
 
 _AUCTION_WATCHES = TypeAdapter(list[AuctionWatch])
 _AUCTION_ALERTS = TypeAdapter(list[AuctionAlertSchema])
+
+SIM_SLOTS = (
+    "head",
+    "neck",
+    "shoulder",
+    "back",
+    "chest",
+    "wrist",
+    "hands",
+    "waist",
+    "legs",
+    "feet",
+    "finger1",
+    "finger2",
+    "trinket1",
+    "trinket2",
+    "main_hand",
+    "off_hand",
+    "ranged",
+)
+"""Every gear slot the sim understands, matching the website's ``SimItem.slot`` literal."""
+
+SIM_MOBS = ("humanoid", "undead", "beast", "demon", "dragonkin", "elemental", "giant", "mechanical")
+"""Every mob type the sim understands, matching the website's ``SimItem``/``SimRequest`` ``mobs`` literal."""
+
+MAX_SIM_SWAPS = 6
+MAX_SIM_WEARING = 17
+MAX_QUEUED_SIMS_PER_MEMBER = 3
+"""Jobs queued or running at once per ``requested_by`` before the API answers 409 (``sidequest-common`` constant)."""
+
+
+class SimItem(BaseModel):
+    """One item to try or correct a baseline with.
+
+    Mirrors the website's ``SimItem`` by hand: the sim schemas aren't in the ``sidequest-common`` pin yet.
+    ``item`` is a numeric item id, a Wowhead URL containing ``item=ID``, or an item name (case-insensitive,
+    resolved against the sim's item database); the bot never resolves it itself.
+    """
+
+    item: str
+    slot: str | None = None
+    enchant: str | None = None
+    suffix: str | None = None
+
+
+class SimRequest(BaseModel):
+    """Body for ``POST /api/guilds/{id}/sims``. Mirrors the website's ``SimRequest`` by hand."""
+
+    character: str
+    swaps: list[SimItem] = Field(min_length=1, max_length=MAX_SIM_SWAPS)
+    wearing: list[SimItem] = Field(default_factory=list, max_length=MAX_SIM_WEARING)
+    spec: str | None = None
+    talents: str | None = None
+    targets: list[int] = Field(default_factory=lambda: [1, 4])
+    mobs: list[str] = Field(default_factory=lambda: ["humanoid"])
+    duration: int = 90
+    requested_by: str | None = None
+
+
+SimJobStatus = Literal["queued", "running", "done", "failed"]
+
+
+class SimMetrics(BaseModel):
+    """One set of per-run metrics. Mirrors the website's ``SimMetrics`` by hand."""
+
+    dps: float | None = None
+    tps: float | None = None
+    dtps: float | None = None
+    hps: float | None = None
+
+
+class SimRow(BaseModel):
+    """One target-count/mob combination's baseline vs swapped metrics. Mirrors ``SimRow`` by hand."""
+
+    targets: int
+    mob: str
+    baseline: SimMetrics
+    swapped: SimMetrics
+    delta_pct: SimMetrics
+    noise: list[str] = Field(default_factory=list)
+
+
+class SimResultItem(BaseModel):
+    """One side of a gear change: ``None`` on ``from_item`` means the slot was empty.
+
+    Mirrors the website's (unnamed, inlined) item-change schema by hand.
+    """
+
+    id: int
+    name: str
+
+
+class SimChange(BaseModel):
+    """One slot's before/after item in a comparison.
+
+    Mirrors the website's (unnamed, inlined) change schema by hand.
+    """
+
+    slot: str
+    from_item: SimResultItem | None = None
+    to_item: SimResultItem
+
+
+class SimComparison(BaseModel):
+    """One full gear-change scenario (all swaps applied, or one possible slot for an unslotted ring/trinket swap).
+
+    Mirrors the website's ``SimComparison`` by hand.
+    """
+
+    label: str
+    changes: list[SimChange]
+    rows: list[SimRow]
+
+
+class SimResult(BaseModel):
+    """A finished sim's full output. Mirrors the website's ``SimResult`` by hand."""
+
+    character: str
+    class_name: str
+    spec: str
+    role: Literal["tank", "healer", "dps"]
+    level: int
+    gear_fetched_at: datetime | None = None
+    iterations: int
+    duration: int
+    comparisons: list[SimComparison]
+    notes: list[str] = Field(default_factory=list)
+
+
+class SimJob(BaseModel):
+    """``POST``/``GET /api/guilds/{id}/sims(/{id})``. Mirrors the website's ``SimJob`` by hand."""
+
+    id: UUID
+    status: SimJobStatus
+    position: int | None = None
+    error: str | None = None
+    result: SimResult | None = None
+    created_at: datetime
 
 
 class APIError(Exception):
@@ -1144,3 +1282,19 @@ class SideQuestAPI:
         Raises ``NotFoundError`` if their Discord account isn't linked, or if they have no watch on that item.
         """
         await self._request("DELETE", f"{self._guild(guild_id)}/members/{user_id}/auction-watches/{item_id}")
+
+    # --- Sim jobs
+
+    async def create_sim_job(self, guild_id: int, request: SimRequest) -> SimJob:
+        """Queue a gear-swap sim (``POST .../sims``); 202 while it's queued.
+
+        Raises ``APIError`` (400) for an unresolvable character/item/spec, or (429) past
+        :data:`MAX_QUEUED_SIMS_PER_MEMBER` queued/running jobs for ``request.requested_by``.
+        """
+        data = await self._request("POST", f"{self._guild(guild_id)}/sims", body=request)
+        return _parse(SimJob.model_validate, data)
+
+    async def get_sim_job(self, guild_id: int, job_id: UUID) -> SimJob:
+        """Poll one sim job's current status/result. Raises ``NotFoundError`` for an unknown job."""
+        data = await self._request("GET", f"{self._guild(guild_id)}/sims/{job_id}")
+        return _parse(SimJob.model_validate, data)

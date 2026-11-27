@@ -127,6 +127,13 @@ lives there.
   are listed, and its 14-day price range. `/watch <item> <price>` (e.g. `1g20s`, `35s`, `80c`) DMs you when that
   item's price drops to or below your target; `/unwatch <item>` removes a watch and `/watches` lists yours. Watches
   need your Discord account linked on the site.
+- **Gear sims.** Start a post in the **sim** forum naming a character and up to six items to try (a Wowhead link,
+  item id, or name; optionally `slot:` in front and ` +Enchant Name` after); `targets:`, `mobs:`, `duration:`,
+  `spec:`, `talents:` and `wearing:` (baseline corrections) lines are optional. The bot replies "Simming…", queues
+  it through the site, and edits that reply with a results table once it's done: the gear changes, then threat and
+  damage taken (tanks) or DPS (everyone else) per target count, with anything within noise marked. A later message
+  from you in the same thread re-runs it with its own text. The forum's post guidelines show the format. Level 55+
+  only; healers, enhancement shamans and warlocks can't be simmed yet.
 
 ## Commands for officers
 

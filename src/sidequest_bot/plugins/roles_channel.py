@@ -19,6 +19,7 @@ from sidequest_bot.api_client import APIError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.channel_sync import RenderedPost, ensure_channel_below, sync_messages
 from sidequest_bot.lib.embeds import Colors, make_embed, pack_lines
+from sidequest_bot.lib.guild_ranks import RANK_ROLE_NAMES
 from sidequest_bot.plugins.addons_channel import CHANNEL_NAME as ADDONS_CHANNEL_NAME
 from sidequest_common.schemas import BADGE_LIST
 from sidequest_common.settings import WebSettings
@@ -38,25 +39,26 @@ HISTORY_LIMIT = 50
 _CHANNEL_TOPIC = "Every role in the server and how it's earned. Kept up to date by the bot."
 
 _INTRO = (
-    "Every role in the server, and how it's earned. Officers give the guild ranks (except New Arrival) and the "
-    "hand-given roles; the bot and the site grant and remove everything else on their own."
+    "Every role in the server, and how it's earned. Guild ranks follow your rank in game: when an officer promotes "
+    "or demotes you there, the bot moves your rank role here. Officers give the hand-given roles; the bot and the "
+    "site grant and remove everything else on their own."
 )
 
-_RANK_ENTRIES: tuple[tuple[str, str], ...] = (
-    ("Quest Master", "A guild leader."),
-    ("Quest Guide", "Picked by the Quest Masters; an officer."),
-    ("Expedition Leader", "Picked by the Quest Masters and Quest Guides; leads raids."),
-    ("Seasoned Adventurer", "Character level 60, and the Raid Regular badge (10 raids with the guild)."),
-    ("Adventurer", "14 days in the guild, and the First Steps badge (came to a guild event)."),
-    (
-        "New Arrival",
-        (
-            "Confirmed in the guild: linking Battle.net with a character on the guild roster, or a Quest Master "
-            "approving or confirming you."
-        ),
+_RANK_HOW: dict[str, str] = {
+    "Quest Master": "A guild leader.",
+    "Quest Guide": "Picked by the Quest Masters; an officer.",
+    "Expedition Leader": "Picked by the Quest Masters and Quest Guides; leads raids.",
+    "Seasoned Adventurer": "Character level 60, and the Raid Regular badge (10 raids with the guild).",
+    "Adventurer": "14 days in the guild, and the First Steps badge (came to a guild event).",
+    "New Arrival": (
+        "Confirmed in the guild: linking Battle.net with a character on the guild roster, or a Quest Master "
+        "approving or confirming you."
     ),
-    ("Alternate Path", "Given by hand for an alt character."),
-)
+    "Alternate Path": "An alt rank in game.",
+}
+_RANK_ENTRIES: tuple[tuple[str, str], ...] = tuple((name, _RANK_HOW[name]) for name in RANK_ROLE_NAMES)
+"""The rank roles the bot syncs from the game (``guild_ranks.RANK_ROLE_NAMES``), highest first, and how each is
+earned in game. Built from that list so ``#roles`` can't drift from the sync."""
 
 _HAND_GIVEN_ENTRIES: tuple[tuple[str, str], ...] = (
     ("NPC", "Friends who don't play the game but want to be in the Discord. They skip #sign-the-ledger."),

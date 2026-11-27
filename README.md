@@ -20,6 +20,14 @@ lives there.
   Linking Battle.net confirms you by itself once one of your characters is on the guild roster (the bot checks every
   30 minutes); otherwise a Quest Master confirms you. Until you sign in or are confirmed you hold *At the Gate* and
   see only the sign-in channel.
+- **Guild ranks follow the game.** Promote or demote someone in game and their Discord rank role follows: the bot
+  reads each member's rank from the Battle.net guild roster (synced every 30 minutes) and, once a minute, gives them
+  the matching role (*Quest Master* down to *New Arrival* and *Alternate Path*) and takes away the rest. The game cuts
+  rank names at 15 characters, so *Expedition Lead* means *Expedition Leader*; an alt rank such as *Quest MasterAlt*
+  means *Alternate Path*. A member with characters at several ranks gets the highest. The officer roles (*Quest
+  Master*, *Quest Guide*, *Expedition Leader*) come only from characters their own linked Battle.net account owns, so
+  no addon upload or site link can make someone an officer. Members with no character on the roster keep the rank
+  roles they have.
 - **Confirm in guild.** For someone who won't sign in on the website: a Quest Master right-clicks them, then Apps,
   then **Confirm in guild**, or approves a request posted from the gate (below). They get *New Arrival* without
   *Signed the Ledger*.

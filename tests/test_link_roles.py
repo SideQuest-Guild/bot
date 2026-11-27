@@ -30,14 +30,23 @@ def _config(
     )
 
 
-def _fake_role(role_id: int, *, assignable: bool = True, position: int = 0, managed: bool = False) -> MagicMock:
+def _fake_role(
+    role_id: int,
+    *,
+    assignable: bool = True,
+    position: int = 0,
+    managed: bool = False,
+    name: str | None = None,
+    permissions: discord.Permissions | None = None,
+) -> MagicMock:
     role = MagicMock(spec=discord.Role)
     role.id = role_id
+    role.name = name or f"role{role_id}"
     role.is_default.return_value = False
     role.managed = managed
     role.position = position
     role.is_assignable.return_value = assignable
-    role.permissions = discord.Permissions.none()
+    role.permissions = permissions or discord.Permissions.none()
     role.mention = f"<@&{role_id}>"
     return role
 
@@ -47,6 +56,7 @@ def _fake_guild(*, guild_id: int = 42, roles: list[MagicMock] | None = None) -> 
     guild.id = guild_id
     roles_by_id = {role.id: role for role in (roles or [])}
     guild.get_role.side_effect = roles_by_id.get
+    guild.roles = list(roles or [])
     guild.members = []
     return guild
 
@@ -587,6 +597,143 @@ class TestSyncGuild:
 
         member.add_roles.assert_not_awaited()
         member.remove_roles.assert_not_awaited()
+
+
+def _rank_guild() -> tuple[MagicMock, dict[str, MagicMock]]:
+    """The guild's rank roles as live: the three officer roles carry moderator permissions."""
+    moderator = discord.Permissions(manage_messages=True, kick_members=True)
+    names = ["Quest Master", "Quest Guide", "Expedition Leader", "Seasoned Adventurer", "Adventurer", "New Arrival"]
+    roles = {
+        name: _fake_role(
+            500 + i,
+            name=name,
+            position=50 - i,
+            permissions=moderator if name in {"Quest Master", "Quest Guide", "Expedition Leader"} else None,
+        )
+        for i, name in enumerate(names)
+    }
+    return _fake_guild(roles=list(roles.values())), roles
+
+
+class TestRankRoles:
+    """In-game promotions and demotions move the member's Discord rank role on the next sync."""
+
+    async def _sync(self, member: MagicMock, guild: MagicMock, link: MemberLink, **config: int | None) -> None:
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(
+            linked_role_id=None, battlenet_role_id=None, roster_role_id=config.get("roster_role_id")
+        )
+        api = AsyncMock()
+        api.list_member_links.return_value = [link]
+        await _make_cog(api=api, configs=configs)._sync_guild(guild)
+
+    async def test_promotion_swaps_the_rank_role_and_new_arrival_is_not_re_granted(self) -> None:
+        guild, roles = _rank_guild()
+        member = _fake_member(1, roles=[roles["New Arrival"], roles["Adventurer"]])
+        link = MemberLink(
+            discord_id=1,
+            battlenet_linked=True,
+            roster_confirmed=True,
+            guild_ranks=["Seasoned Advent", "New Arrival"],
+            battlenet_guild_ranks=["Seasoned Advent"],
+        )
+
+        await self._sync(member, guild, link, roster_role_id=roles["New Arrival"].id)
+
+        member.add_roles.assert_awaited_once_with(
+            roles["Seasoned Adventurer"], reason="In-game guild rank: Seasoned Adventurer"
+        )
+        member.remove_roles.assert_awaited_once_with(
+            roles["Adventurer"], roles["New Arrival"], reason="In-game guild rank: Seasoned Adventurer"
+        )
+
+    async def test_officer_demoted_in_game_loses_the_officer_role(self) -> None:
+        guild, roles = _rank_guild()
+        member = _fake_member(1, roles=[roles["Quest Guide"]])
+        link = MemberLink(
+            discord_id=1,
+            battlenet_linked=True,
+            roster_confirmed=True,
+            guild_ranks=["Adventurer"],
+            battlenet_guild_ranks=["Adventurer"],
+        )
+
+        await self._sync(member, guild, link)
+
+        member.add_roles.assert_awaited_once_with(roles["Adventurer"], reason="In-game guild rank: Adventurer")
+        member.remove_roles.assert_awaited_once_with(roles["Quest Guide"], reason="In-game guild rank: Adventurer")
+
+    async def test_officer_role_granted_from_a_battlenet_owned_character_despite_its_permissions(self) -> None:
+        guild, roles = _rank_guild()
+        member = _fake_member(1, roles=[roles["Adventurer"]])
+        link = MemberLink(
+            discord_id=1,
+            battlenet_linked=True,
+            roster_confirmed=True,
+            guild_ranks=["Expedition Lead", "Adventurer"],
+            battlenet_guild_ranks=["Expedition Lead"],
+        )
+
+        await self._sync(member, guild, link)
+
+        member.add_roles.assert_awaited_once_with(
+            roles["Expedition Leader"], reason="In-game guild rank: Expedition Leader"
+        )
+        member.remove_roles.assert_awaited_once_with(
+            roles["Adventurer"], reason="In-game guild rank: Expedition Leader"
+        )
+
+    async def test_officer_rank_held_only_by_a_site_linked_character_changes_nothing(self) -> None:
+        guild, roles = _rank_guild()
+        member = _fake_member(1, roles=[roles["Adventurer"]])
+        link = MemberLink(
+            discord_id=1,
+            battlenet_linked=False,
+            roster_confirmed=True,
+            guild_ranks=["Quest Master"],
+            battlenet_guild_ranks=[],
+        )
+
+        await self._sync(member, guild, link)
+
+        member.add_roles.assert_not_awaited()
+        member.remove_roles.assert_not_awaited()
+
+    async def test_no_rank_on_the_roster_leaves_hand_given_rank_roles_alone(self) -> None:
+        guild, roles = _rank_guild()
+        member = _fake_member(1, roles=[roles["New Arrival"], roles["Adventurer"]])
+        link = MemberLink(discord_id=1, battlenet_linked=False, roster_confirmed=True)
+
+        await self._sync(member, guild, link, roster_role_id=roles["New Arrival"].id)
+
+        member.add_roles.assert_not_awaited()
+        member.remove_roles.assert_not_awaited()
+
+    async def test_a_rank_role_above_the_bot_is_skipped_and_warned_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        guild, roles = _rank_guild()
+        roles["Quest Master"].is_assignable.return_value = False
+        member = _fake_member(1, roles=[roles["Quest Master"]])
+        link = MemberLink(
+            discord_id=1,
+            battlenet_linked=True,
+            roster_confirmed=True,
+            guild_ranks=["Adventurer"],
+            battlenet_guild_ranks=["Adventurer"],
+        )
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config(linked_role_id=None, battlenet_role_id=None, roster_role_id=None)
+        api = AsyncMock()
+        api.list_member_links.return_value = [link]
+        cog = _make_cog(api=api, configs=configs)
+
+        with caplog.at_level(logging.WARNING):
+            await cog._sync_guild(guild)
+            await cog._sync_guild(guild)
+
+        member.remove_roles.assert_not_awaited()
+        assert sum("can't be synced" in record.message for record in caplog.records) == 1
 
 
 class TestGuestWelcomeDm:

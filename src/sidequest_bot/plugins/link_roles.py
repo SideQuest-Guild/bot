@@ -31,15 +31,18 @@ from discord.ext import commands, tasks
 
 from sidequest_bot.api_client import APIError, NotFoundError
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
+from sidequest_bot.lib.guild_ranks import OFFICER_RANK_ROLE_NAMES, RANK_ROLE_NAMES, wanted_rank_role
 from sidequest_bot.lib.roles import grant_block_reason
 from sidequest_bot.plugins.guest_welcome import send_guest_welcome_dm
 from sidequest_bot.plugins.member_profiles import build_member_profile
+from sidequest_bot.plugins.roles_channel import resolve_role
 from sidequest_bot.plugins.signup_notices import clicker_is_gm
 from sidequest_bot.plugins.welcome import autorole_block_reason, completed_screening
 from sidequest_common.schemas import DiscordRosterConfirmRequest, GuildConfigUpdate
 from sidequest_common.settings import WebSettings
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from uuid import UUID
 
     from sidequest_common.schemas import GuildConfigSchema, MemberLink, RoleResetCandidate
@@ -142,6 +145,37 @@ def plan_role_strip(member_roles: list[discord.Role], *, gate_role_id: int | Non
     return [role.id for role in member_roles if role.is_assignable() and role.id != gate_role_id]
 
 
+def plan_rank_roles(
+    member_role_ids: set[int], wanted_role_id: int | None, rank_role_ids: Iterable[int]
+) -> tuple[list[int], list[int]]:
+    """Rank roles to add/remove so the member holds exactly ``wanted_role_id`` among ``rank_role_ids``.
+
+    ``None`` (their in-game rank is unknown, or calls for no role) changes nothing: a member whose characters
+    aren't on the roster keeps whatever an officer gave them.
+    """
+    if wanted_role_id is None:
+        return [], []
+    to_add = [] if wanted_role_id in member_role_ids else [wanted_role_id]
+    to_remove = [role_id for role_id in rank_role_ids if role_id != wanted_role_id and role_id in member_role_ids]
+    return to_add, to_remove
+
+
+def rank_grant_block_reason(role: discord.Role) -> str | None:
+    """Why the bot must not grant the rank role ``role``, or None if it may.
+
+    The officer rank roles are the one deliberate exception to :func:`grant_block_reason`'s moderator-permission
+    rule: they follow the in-game rank of characters the member's own Battle.net account owns
+    (:func:`~sidequest_bot.lib.guild_ranks.wanted_rank_role`). Every other rank role gets the full check.
+    """
+    if role.name not in OFFICER_RANK_ROLE_NAMES:
+        return grant_block_reason(role)
+    if role.is_default() or role.managed:
+        return f"{role.mention} can't be granted."
+    if not role.is_assignable():
+        return f"{role.mention} is at or above my highest role; move my role above it first."
+    return None
+
+
 class LinkRolesCog(commands.Cog):
     """Periodic role sync plus the join/screening listeners and the ``/linkroles`` admin group."""
 
@@ -190,6 +224,7 @@ class LinkRolesCog(commands.Cog):
             and config.battlenet_role_id is None
             and config.gate_role_id is None
             and config.roster_role_id is None
+            and not self._rank_roles(guild, config)
         ):
             return
         links_by_discord_id = await self._fetch_links(guild.id)
@@ -202,6 +237,11 @@ class LinkRolesCog(commands.Cog):
     async def _fetch_links(self, guild_id: int) -> dict[int, MemberLink]:
         links: list[MemberLink] = await self.bot.api.list_member_links(guild_id)
         return {link.discord_id: link for link in links}
+
+    @staticmethod
+    def _rank_roles(guild: discord.Guild, config: GuildConfigSchema) -> dict[str, discord.Role]:
+        """The guild's rank roles by name (``RANK_ROLE_NAMES``), resolved as ``#roles`` does; missing ones left out."""
+        return {name: role for name in RANK_ROLE_NAMES if (role := resolve_role(guild, name, config)) is not None}
 
     @staticmethod
     def _ranked_above_roster_role(guild: discord.Guild, roster_role_id: int | None, member: discord.Member) -> bool:
@@ -225,6 +265,12 @@ class LinkRolesCog(commands.Cog):
         battlenet_linked = link.battlenet_linked if link is not None else False
         roster_confirmed = link.roster_confirmed if link is not None else False
         member_role_ids = {role.id for role in member.roles}
+        # In-game rank -> rank role. Once a member's rank is known, the rank sync owns every rank role, New Arrival
+        # included, so the roster-confirmation rule below stands aside for that role.
+        rank_roles = self._rank_roles(guild, config)
+        wanted_rank = wanted_rank_role(link.guild_ranks, link.battlenet_guild_ranks) if link is not None else None
+        wanted_rank_role_obj = rank_roles.get(wanted_rank) if wanted_rank is not None else None
+        ranked = wanted_rank_role_obj is not None
         to_add, to_remove = plan_role_changes(
             member_role_ids,
             signed_in=signed_in,
@@ -232,13 +278,19 @@ class LinkRolesCog(commands.Cog):
             linked_role_id=config.linked_role_id,
             battlenet_role_id=config.battlenet_role_id,
             gate_role_id=config.gate_role_id,
-            roster_role_id=config.roster_role_id,
+            roster_role_id=None if ranked else config.roster_role_id,
             roster_confirmed=roster_confirmed,
             ranked_above_roster_role=self._ranked_above_roster_role(guild, config.roster_role_id, member),
             ledger_exempt=skips_ledger(member.roles),
         )
-        if not to_add and not to_remove:
+        rank_add, rank_remove = plan_rank_roles(
+            member_role_ids,
+            wanted_rank_role_obj.id if wanted_rank_role_obj is not None else None,
+            [role.id for role in rank_roles.values()],
+        )
+        if not to_add and not to_remove and not rank_add and not rank_remove:
             return
+        await self._apply_rank_roles(guild, member, rank_add, rank_remove, wanted_rank)
         for role_id in to_add:
             if (role := self._resolve_grantable_role(guild, role_id)) is None:
                 continue
@@ -268,6 +320,48 @@ class LinkRolesCog(commands.Cog):
                 await member.remove_roles(*remove_roles, reason="Link roles sync")
             except discord.HTTPException:
                 logger.warning("Failed to remove link role(s) from %s in guild %s", member.id, guild.id, exc_info=True)
+
+    async def _apply_rank_roles(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        to_add: list[int],
+        to_remove: list[int],
+        rank: str | None,
+    ) -> None:
+        """Grant/remove rank roles; a role the bot may not touch is skipped and warned about once."""
+        reason = f"In-game guild rank: {rank}"
+        for role_id in to_add:
+            role = guild.get_role(role_id)
+            if role is None or not self._may_touch_rank_role(guild, role):
+                continue
+            try:
+                await member.add_roles(role, reason=reason)
+            except discord.HTTPException:
+                logger.warning(
+                    "Failed to grant rank role %s to %s in guild %s", role_id, member.id, guild.id, exc_info=True
+                )
+        remove = [
+            role
+            for role_id in to_remove
+            if (role := guild.get_role(role_id)) is not None and self._may_touch_rank_role(guild, role)
+        ]
+        if remove:
+            try:
+                await member.remove_roles(*remove, reason=reason)
+            except discord.HTTPException:
+                logger.warning("Failed to remove rank role(s) from %s in guild %s", member.id, guild.id, exc_info=True)
+
+    def _may_touch_rank_role(self, guild: discord.Guild, role: discord.Role) -> bool:
+        """Whether the bot may grant or remove the rank role ``role``, warning once per (guild, role) if not."""
+        key = (guild.id, role.id)
+        if (reason := rank_grant_block_reason(role)) is not None:
+            if key not in self._warned_role_ids:
+                logger.warning("Rank role %s in guild %s can't be synced: %s", role.id, guild.id, reason)
+                self._warned_role_ids.add(key)
+            return False
+        self._warned_role_ids.discard(key)
+        return True
 
     def _resolve_grantable_role(self, guild: discord.Guild, role_id: int) -> discord.Role | None:
         """``role_id``'s role if the bot may grant it, warning once per (guild, role) otherwise."""

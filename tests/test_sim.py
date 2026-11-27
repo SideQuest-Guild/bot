@@ -8,7 +8,9 @@ from uuid import uuid4
 import discord
 
 from sidequest_bot.api_client import APIError, SimChange, SimComparison, SimItem, SimJob, SimMetrics, SimResult, SimRow
+from sidequest_bot.lib.sim_chart import render_chart
 from sidequest_bot.plugins.sim import (
+    CHART_FILENAME,
     FORUM_NAME,
     POST_NAME,
     USAGE,
@@ -16,9 +18,11 @@ from sidequest_bot.plugins.sim import (
     SimCog,
     build_footer,
     build_request,
+    chart_panels,
     format_sim_results,
     parse_item_line,
     parse_sim_post,
+    verdict,
 )
 
 # --- parse_item_line
@@ -177,15 +181,37 @@ def test_build_request_sets_requested_by() -> None:
 # --- formatter
 
 
-def _row(*, targets: int = 1, mob: str = "humanoid", delta: float = 5.0, noise: list[str] | None = None) -> SimRow:
-    swapped = 1000.0 * (1 + delta / 100)
+def _row(
+    *,
+    targets: int = 1,
+    mob: str = "humanoid",
+    delta: float = 5.0,
+    dtps: float | None = None,
+    noise: list[str] | None = None,
+) -> SimRow:
+    """A row where every metric changes by ``delta`` % (``dtps`` overrides damage taken)."""
+    dtps = delta if dtps is None else dtps
     return SimRow(
         targets=targets,
         mob=mob,
         baseline=SimMetrics(dps=1000.0, tps=1000.0, dtps=1000.0, hps=1000.0),
-        swapped=SimMetrics(dps=swapped, tps=swapped, dtps=swapped, hps=swapped),
-        delta_pct=SimMetrics(dps=delta, tps=delta, dtps=delta, hps=delta),
+        swapped=SimMetrics(dps=1000.0, tps=1000.0, dtps=1000.0, hps=1000.0),
+        delta_pct=SimMetrics(dps=delta, tps=delta, dtps=dtps, hps=delta),
         noise=noise or [],
+    )
+
+
+def _comparison(*rows: SimRow, slot: str = "finger2", old: str | None = "Old Ring") -> SimComparison:
+    return SimComparison(
+        label="All swaps",
+        changes=[
+            SimChange(
+                slot=slot,
+                from_item={"id": 1, "name": old} if old else None,
+                to_item={"id": 2, "name": "Seal of Rivendare"},
+            )
+        ],
+        rows=list(rows),
     )
 
 
@@ -199,70 +225,94 @@ def _result(**overrides: object) -> SimResult:
         "gear_fetched_at": datetime(2026, 11, 1, tzinfo=UTC),
         "iterations": 5000,
         "duration": 90,
-        "comparisons": [
-            SimComparison(
-                label="All swaps",
-                changes=[
-                    SimChange(
-                        slot="finger2",
-                        from_item={"id": 1, "name": "Old Ring"},
-                        to_item={"id": 2, "name": "Seal of Rivendare"},
-                    )
-                ],
-                rows=[_row(targets=1, delta=5.0), _row(targets=4, delta=3.0, noise=["tps", "dtps"])],
-            )
-        ],
+        "comparisons": [_comparison(_row(targets=1, dtps=-2.0), _row(targets=4, dtps=1.0, noise=["dtps"]))],
         "notes": [],
     }
     base.update(overrides)
     return SimResult.model_validate(base)
 
 
+class TestVerdict:
+    def test_better_everywhere_says_pick_it(self) -> None:
+        text = verdict(_comparison(_row(dtps=-1.0), _row(targets=4, dtps=-1.0)), "tank")
+        assert text == "**Pick Seal of Rivendare.** You get more threat and less damage taken."
+
+    def test_noise_does_not_count_against_a_pick(self) -> None:
+        text = verdict(_comparison(_row(dtps=3.0, noise=["dtps"])), "tank")
+        assert text == "**Pick Seal of Rivendare.** You get more threat."
+
+    def test_worse_everywhere_says_keep_what_you_have(self) -> None:
+        text = verdict(_comparison(_row(delta=-2.0), _row(targets=4, delta=-1.0)), "dps")
+        assert text == "**Keep Old Ring.** Seal of Rivendare gives you less damage."
+
+    def test_all_noise_says_either(self) -> None:
+        text = verdict(_comparison(_row(noise=["tps", "dtps"])), "tank")
+        assert text.startswith("**Either is fine.**")
+
+    def test_tank_threat_for_damage_trade_is_a_conditional_pick(self) -> None:
+        text = verdict(_comparison(_row(delta=4.0, dtps=3.0), _row(targets=4, delta=6.0, dtps=4.0)), "tank")
+        assert text.startswith("**Pick Seal of Rivendare if** you're losing threat")
+        assert "**keep Old Ring** for bosses that hit hard" in text
+
+    def test_tank_safer_but_less_threat_is_the_reverse_condition(self) -> None:
+        text = verdict(_comparison(_row(delta=-3.0, dtps=-2.0)), "tank")
+        assert text.startswith("**Pick Seal of Rivendare if** you're taking too much damage")
+
+    def test_boss_versus_packs_split(self) -> None:
+        assert verdict(_comparison(_row(delta=3.0), _row(targets=4, delta=-2.0)), "dps") == (
+            "**Pick Seal of Rivendare for bosses** (one enemy); **keep Old Ring for packs**."
+        )
+        assert verdict(_comparison(_row(delta=-3.0), _row(targets=4, delta=2.0)), "dps") == (
+            "**Pick Seal of Rivendare for packs**; **keep Old Ring for bosses** (one enemy)."
+        )
+
+    def test_empty_slot_is_named(self) -> None:
+        text = verdict(_comparison(_row(delta=-1.0), old=None), "dps")
+        assert text.startswith("**Keep the empty slot.**")
+
+
 class TestFormatSimResults:
-    def test_header_and_table(self) -> None:
+    def test_one_option(self) -> None:
         chunks = format_sim_results(_result())
         assert len(chunks) == 1
         text = chunks[0]
-        assert "Nox Zul" in text
+        assert "**Nox Zul** · Protection Paladin (tank)" in text
         assert (
-            "[Old Ring](<https://www.wowhead.com/forever/item=1>) → "
+            "**Ring 2:** [Old Ring](<https://www.wowhead.com/forever/item=1>) → "
             "[Seal of Rivendare](<https://www.wowhead.com/forever/item=2>)"
         ) in text
-        assert "Option 1" not in text  # one comparison: no option headings
-        table = text.split("```")[1]
-        header, first, second = table.strip().splitlines()[:3]
-        assert header.split() == ["Targets", "Mob", "Δ", "Threat", "Δ", "Dmg", "Taken"]
-        assert first.split() == ["1", "humanoid", "+5.0%", "+5.0%"]
-        assert second.split() == ["4", "humanoid", "+3.0%", "~", "+3.0%", "~"]
-        # columns line up: each value starts where its header does
-        assert first.index("+5.0%") == header.index("Δ Threat")
+        assert "**Pick Seal of Rivendare.**" in text
+        assert "**1 enemy (a boss):** 🟢 5.0% more threat · 🟢 2.0% less damage taken" in text
+        assert "**4 enemies (packs):** 🟢 5.0% more threat · ⚪ damage taken about the same" in text
+        assert "Option" not in text
+        assert "Best:" not in text
 
-    def test_several_comparisons_get_option_headings(self) -> None:
-        comparison = _result().comparisons[0]
-        text = format_sim_results(_result(comparisons=[comparison, comparison]))[0]
+    def test_several_options_name_the_best(self) -> None:
+        weak = _comparison(_row(delta=1.0), slot="finger1", old="Jereman's Bauble")
+        strong = _comparison(_row(delta=3.0), slot="finger2", old="Rosewine Circle")
+        text = format_sim_results(_result(comparisons=[weak, strong], role="dps"))[0]
+        assert "**Best: Seal of Rivendare in Ring 2** (instead of Rosewine Circle)" in text
         assert "**Option 1**" in text
         assert "**Option 2**" in text
 
-    def test_tank_role_shows_threat_and_damage_taken_columns(self) -> None:
-        text = format_sim_results(_result(role="tank"))[0]
-        assert "Δ Threat" in text
-        assert "Δ Dmg Taken" in text
-        assert "Δ DPS" not in text
-
-    def test_dps_role_shows_dps_column(self) -> None:
+    def test_dps_role_talks_about_damage_only(self) -> None:
         text = format_sim_results(_result(role="dps"))[0]
-        assert "Δ DPS" in text
-        assert "Δ Threat" not in text
+        assert "more damage" in text
+        assert "threat" not in text
 
-    def test_noise_marked_and_explained(self) -> None:
-        text = format_sim_results(_result())[0]
-        assert "~ = noise" in text
-        clean = _result(comparisons=[SimComparison(label="x", changes=[], rows=[_row()])])
-        assert "~ = noise" not in format_sim_results(clean)[0]
+    def test_several_mob_types_label_each_fight(self) -> None:
+        comparison = _comparison(_row(mob="humanoid"), _row(mob="undead"))
+        text = format_sim_results(_result(comparisons=[comparison]))[0]
+        assert "**1 enemy, humanoid:**" in text
+        assert "**1 enemy, undead:**" in text
 
-    def test_footer_has_iterations_duration_and_gear_date(self) -> None:
+    def test_noise_dot_explained_only_when_used(self) -> None:
+        assert "⚪ = " in build_footer(_result())
+        assert "⚪ = " not in build_footer(_result(comparisons=[_comparison(_row())]))
+
+    def test_footer_has_runs_duration_and_gear_date(self) -> None:
         footer = build_footer(_result())
-        assert "5000 iterations" in footer
+        assert "Simmed 5000 times per fight" in footer
         assert "90s fights" in footer
         assert "2026-11-01" in footer
 
@@ -284,6 +334,23 @@ class TestFormatSimResults:
         chunks = format_sim_results(_result(comparisons=comparisons))
         assert len(chunks) > 1
         assert all(len(chunk) <= 2000 for chunk in chunks)
+
+
+class TestChartPanels:
+    def test_bars_point_right_when_better(self) -> None:
+        (panel,) = chart_panels(_result())
+        assert panel.title == "Seal of Rivendare vs Old Ring"
+        threat, damage = panel.groups
+        assert [bar.value for bar in threat.bars] == [5.0, 5.0]
+        # Less damage taken is better, so it points right; noise is drawn flat.
+        assert [(bar.value, bar.effect, bar.text) for bar in damage.bars] == [
+            (2.0, "better", "2.0% less"),
+            (0.0, "same", "about the same"),
+        ]
+
+    def test_renders_a_png(self) -> None:
+        result = _result(comparisons=[_comparison(_row(delta=-3.0)), _comparison(_row(delta=40.0))])
+        assert render_chart(chart_panels(result)).startswith(b"\x89PNG")
 
 
 # --- cog behavior
@@ -377,7 +444,11 @@ async def test_a_message_is_queued_for_its_author_and_answered_with_results() ->
     assert guild_id == 42
     assert request.character == "Nox Zul"
     assert request.requested_by == "7"
-    assert "Seal of Rivendare" in reply.edit.await_args.kwargs["content"]
+    edit = reply.edit.await_args.kwargs
+    assert "Seal of Rivendare" in edit["content"]
+    (chart,) = edit["attachments"]
+    assert chart.filename == CHART_FILENAME
+    assert chart.fp.read().startswith(b"\x89PNG")
 
 
 async def test_sweep_creates_the_post_with_the_usage_when_missing() -> None:

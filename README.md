@@ -131,9 +131,11 @@ lives there.
   message), write a message naming a character and up to six items to try (a Wowhead link, item id, or name;
   optionally `slot:` in front and ` +Enchant Name` after); `targets:`, `mobs:`, `duration:`, `spec:`, `talents:` and
   `wearing:` (gear Battle.net doesn't show yet) lines are optional. The bot replies "Simming…", queues it through the
-  site, and edits that reply with a results table once it's done: the gear changes, then threat and damage taken
-  (tanks) or DPS (everyone else) per target count, with anything within noise marked. Level 55+ only; healers,
-  enhancement shamans and warlocks can't be simmed yet.
+  site, and edits that reply once it's done: the gear changes (linked to Wowhead), a plain-English pick ("Pick X",
+  "Keep Y", "Pick X if…", or "Pick X for bosses, keep Y for packs"), one line per fight with threat and damage taken
+  (tanks) or damage (everyone else), and a bar chart where better points right. Changes too small to tell apart from
+  the sim's random variation show as "about the same". When a ring or trinket is tried in both slots, the reply names
+  the best one. Level 55+ only; healers, enhancement shamans and warlocks can't be simmed yet.
 
 ## Commands for officers
 

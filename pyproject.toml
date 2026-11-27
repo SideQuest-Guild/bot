@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.16",
     "tenacity>=9.2",
     "defusedxml>=0.7.1",
+    "pillow>=13",
 ]
 
 [project.scripts]

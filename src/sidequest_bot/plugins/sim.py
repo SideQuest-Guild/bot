@@ -21,6 +21,7 @@ character, ambiguous item, unsupported spec, the 429 queue limit) are replied ve
 
 import asyncio
 import contextlib
+import io
 import logging
 import re
 import time
@@ -44,6 +45,7 @@ from sidequest_bot.api_client import (
     SimRow,
 )
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
+from sidequest_bot.lib.sim_chart import Bar, Effect, MetricGroup, Panel, render_chart
 from sidequest_bot.plugins.items import WOWHEAD_URL
 
 if TYPE_CHECKING:
@@ -57,6 +59,7 @@ SWEEP_INTERVAL_HOURS = 6
 POLL_INTERVAL_SECONDS = 5
 POLL_TIMEOUT_SECONDS = 300
 DISCORD_MESSAGE_LIMIT = 2000
+CHART_FILENAME = "gear-sim.png"
 
 USAGE = (
     "**Sim a gear swap**\n"
@@ -85,11 +88,41 @@ _SLOT_PATTERN = "|".join(re.escape(slot) for slot in SIM_SLOTS)
 _SLOT_RE = re.compile(rf"^(?P<slot>{_SLOT_PATTERN})\s*:\s*(?P<rest>.*)$", re.IGNORECASE)
 _ENCHANT_RE = re.compile(r"^(?P<item>.+?)\s\+(?P<enchant>\S.*)$")
 
-_ROLE_METRICS: dict[str, list[tuple[str, str]]] = {
-    "tank": [("tps", "Δ Threat"), ("dtps", "Δ Dmg Taken")],
-    "healer": [("hps", "Δ Healing")],
-    "dps": [("dps", "Δ DPS")],
+
+@dataclass(frozen=True)
+class _Metric:
+    """A role's headline number: its result key, its name in sentences, and which way is good."""
+
+    key: str
+    noun: str
+    higher_is_better: bool
+
+
+_ROLE_METRICS: dict[str, list[_Metric]] = {
+    "tank": [_Metric("tps", "threat", higher_is_better=True), _Metric("dtps", "damage taken", higher_is_better=False)],
+    "healer": [_Metric("hps", "healing", higher_is_better=True)],
+    "dps": [_Metric("dps", "damage", higher_is_better=True)],
 }
+SLOT_LABELS: dict[str, str] = {
+    "head": "Head",
+    "neck": "Neck",
+    "shoulder": "Shoulders",
+    "back": "Back",
+    "chest": "Chest",
+    "wrist": "Wrists",
+    "hands": "Hands",
+    "waist": "Waist",
+    "legs": "Legs",
+    "feet": "Feet",
+    "finger1": "Ring 1",
+    "finger2": "Ring 2",
+    "trinket1": "Trinket 1",
+    "trinket2": "Trinket 2",
+    "main_hand": "Main hand",
+    "off_hand": "Off hand",
+    "ranged": "Ranged",
+}
+_EFFECT_DOT: dict[Effect, str] = {"better": "🟢", "worse": "🔴", "same": "⚪"}
 
 
 @dataclass
@@ -239,48 +272,171 @@ def _item_link(item: SimResultItem) -> str:
 
 
 def format_change(change: SimChange) -> str:
-    """One slot's before/after item, each linked to Wowhead: ``**chest**: [Old](<url>) → [New](<url>)``."""
-    from_name = _item_link(change.from_item) if change.from_item else "—"
-    return f"**{change.slot}**: {from_name} → {_item_link(change.to_item)}"
+    """One slot's before/after item, each linked to Wowhead: ``**Chest:** [Old](<url>) → [New](<url>)``."""
+    from_name = _item_link(change.from_item) if change.from_item else "nothing"
+    slot = SLOT_LABELS.get(change.slot, change.slot)
+    return f"**{slot}:** {from_name} → {_item_link(change.to_item)}"
 
 
-def _delta_cell(row: SimRow, key: str) -> str:
-    value = getattr(row.delta_pct, key)
-    text = "—" if value is None else f"{value:+.1f}%"
-    return f"{text} ~" if key in row.noise else text
+def _metrics(role: str) -> list[_Metric]:
+    return _ROLE_METRICS.get(role, _ROLE_METRICS["dps"])
 
 
-def build_comparison_table(comparison: SimComparison, role: str) -> str:
-    """``comparison``'s rows as a monospace table (Discord doesn't render markdown tables), columns by ``role``.
+def _oriented(row: SimRow, metric: _Metric) -> float | None:
+    """``metric``'s % change with the sign flipped where lower is better, so positive always means better."""
+    value = getattr(row.delta_pct, metric.key)
+    if value is None:
+        return None
+    return value if metric.higher_is_better else -value
 
-    A ``~`` after a change marks it as noise: within two standard errors, so no real difference.
+
+def _effect(row: SimRow, metric: _Metric) -> Effect:
+    value = _oriented(row, metric)
+    if value is None or value == 0 or metric.key in row.noise:
+        return "same"
+    return "better" if value > 0 else "worse"
+
+
+def _change_words(row: SimRow, metric: _Metric) -> str:
+    """``2.5% more threat``, ``0.5% less damage taken``, or ``threat about the same`` (within noise)."""
+    value = getattr(row.delta_pct, metric.key)
+    if value is None or metric.key in row.noise or round(value, 1) == 0:
+        return f"{metric.noun} about the same"
+    return f"{abs(value):.1f}% {'more' if value > 0 else 'less'} {metric.noun}"
+
+
+def _fight_label(row: SimRow, *, show_mob: bool) -> str:
+    """``1 enemy`` / ``4 enemies``, plus the mob type when the sim ran more than one."""
+    label = "1 enemy" if row.targets == 1 else f"{row.targets} enemies"
+    return f"{label}, {row.mob}" if show_mob else label
+
+
+def _fight_kind(row: SimRow) -> str:
+    return "a boss" if row.targets == 1 else "packs"
+
+
+def _names(comparison: SimComparison) -> tuple[str, str]:
+    """``(new, old)`` for the verdict: the item names for a single swap, generic words for several."""
+    if len(comparison.changes) == 1:
+        change = comparison.changes[0]
+        return change.to_item.name, change.from_item.name if change.from_item else "the empty slot"
+    return "the new gear", "your current gear"
+
+
+def _directions(effects: Sequence[Effect]) -> tuple[bool, bool]:
+    return "better" in effects, "worse" in effects
+
+
+def verdict(comparison: SimComparison, role: str) -> str:
+    """A plain-English pick for ``comparison``: pick it, keep what you have, either, or pick it *if* something holds.
+
+    Changes within the sim's margin of error count as "the same". A tank trade-off (more threat for more damage
+    taken, or the reverse) and a boss-versus-packs split each get their own "pick X if" advice.
     """
-    metrics = _ROLE_METRICS.get(role, _ROLE_METRICS["dps"])
-    headers = ["Targets", "Mob", *(label for _, label in metrics)]
-    rows = [[str(row.targets), row.mob, *(_delta_cell(row, key) for key, _ in metrics)] for row in comparison.rows]
-    widths = [max(len(cells[i]) for cells in [headers, *rows]) for i in range(len(headers))]
-    lines = [
-        "  ".join(cell.ljust(width) for cell, width in zip(cells, widths, strict=True)).rstrip()
-        for cells in [headers, *rows]
-    ]
-    legend = "\n~ = noise (within 2 standard errors)" if any(row.noise for row in comparison.rows) else ""
-    return "```\n" + "\n".join(lines) + legend + "\n```"
+    new, old = _names(comparison)
+    metrics = _metrics(role)
+    by_metric = {metric.key: [_effect(row, metric) for row in comparison.rows] for metric in metrics}
+    everything = [effect for effects in by_metric.values() for effect in effects]
+    gains, losses = _directions(everything)
+    if not gains and not losses:
+        return f"**Either is fine.** {new} and {old} come out the same in these fights."
+    if not losses:
+        better = [m for m in metrics if "better" in by_metric[m.key]]
+        return f"**Pick {new}.** You get {' and '.join(_more_or_less(m) for m in better)}."
+    if not gains:
+        worse = [m for m in metrics if "worse" in by_metric[m.key]]
+        return f"**Keep {old}.** {new} gives you {' and '.join(_more_or_less(m, worse=True) for m in worse)}."
+
+    return (_tank_tradeoff(by_metric, new, old) if role == "tank" else None) or _boss_or_packs(
+        comparison, metrics, new, old
+    )
+
+
+def _tank_tradeoff(by_metric: dict[str, list[Effect]], new: str, old: str) -> str | None:
+    """The "pick X if" advice when one of threat and damage taken only improves and the other only gets worse."""
+    threat = _directions(by_metric["tps"])
+    damage = _directions(by_metric["dtps"])
+    if threat == (True, False) and damage == (False, True):
+        return (
+            f"**Pick {new} if** you're losing threat and your healer keeps up; **keep {old}** for bosses that hit hard."
+        )
+    if threat == (False, True) and damage == (True, False):
+        return f"**Pick {new} if** you're taking too much damage; **keep {old}** if you're losing threat."
+    return None
+
+
+def _boss_or_packs(comparison: SimComparison, metrics: Sequence[_Metric], new: str, old: str) -> str:
+    """Bosses-versus-packs advice when one target count only gains and the rest only lose, else a close call."""
+    scores = {row.targets: 0 for row in comparison.rows}
+    for row in comparison.rows:
+        for metric in metrics:
+            effect = _effect(row, metric)
+            scores[row.targets] += 1 if effect == "better" else -1 if effect == "worse" else 0
+    single = scores.get(1, 0)
+    packs = [score for targets, score in scores.items() if targets > 1]
+    if 1 in scores and packs:
+        if single > 0 and all(score < 0 for score in packs):
+            return f"**Pick {new} for bosses** (one enemy); **keep {old} for packs**."
+        if single < 0 and all(score > 0 for score in packs):
+            return f"**Pick {new} for packs**; **keep {old} for bosses** (one enemy)."
+    return f"**Close call.** {new} wins some fights and loses others; see the chart."
+
+
+def _more_or_less(metric: _Metric, *, worse: bool = False) -> str:
+    """``more threat`` / ``less damage taken`` (or the opposite with ``worse``)."""
+    more = metric.higher_is_better != worse
+    return f"{'more' if more else 'less'} {metric.noun}"
+
+
+def _score(comparison: SimComparison, role: str) -> float:
+    """Sum of every real (non-noise) change, oriented so higher is better; ranks options against each other."""
+    total = 0.0
+    for row in comparison.rows:
+        for metric in _metrics(role):
+            value = _oriented(row, metric)
+            if value is not None and metric.key not in row.noise:
+                total += value
+    return total
 
 
 def build_comparison_block(comparison: SimComparison, role: str, *, heading: str | None = None) -> str:
-    """One comparison's optional heading, gear changes, and results table, as one message block."""
-    changes = "\n".join(f"- {format_change(change)}" for change in comparison.changes)
-    table = build_comparison_table(comparison, role)
-    title = f"**{heading}**\n" if heading else ""
-    return f"{title}{changes}\n{table}"
+    """One option's heading, gear changes, verdict, and a plain-English line per fight."""
+    metrics = _metrics(role)
+    show_mob = len({row.mob for row in comparison.rows}) > 1
+    lines = [f"**{heading}**"] if heading else []
+    lines += [format_change(change) for change in comparison.changes]
+    lines.append(verdict(comparison, role))
+    for row in comparison.rows:
+        kind = f" ({_fight_kind(row)})" if not show_mob else ""
+        parts = " · ".join(f"{_EFFECT_DOT[_effect(row, m)]} {_change_words(row, m)}" for m in metrics)
+        lines.append(f"**{_fight_label(row, show_mob=show_mob)}{kind}:** {parts}")
+    return "\n".join(lines)
 
 
 def build_footer(result: SimResult) -> str:
-    """The subtext line(s): any notes (skipped enchants, etc.) plus iterations/duration/gear date."""
+    """The subtext line(s): any notes (skipped enchants, etc.), what ⚪ means, then runs/fight length/gear date."""
     gear_date = result.gear_fetched_at.strftime("%Y-%m-%d") if result.gear_fetched_at else "unknown"
     lines = [f"-# {note}" for note in result.notes]
-    lines.append(f"-# {result.iterations} iterations · {result.duration}s fights · gear as of {gear_date}")
+    if any(row.noise for comparison in result.comparisons for row in comparison.rows):
+        lines.append("-# ⚪ = too small to tell apart from the sim's random variation")
+    lines.append(f"-# Simmed {result.iterations} times per fight · {result.duration}s fights · gear as of {gear_date}")
     return "\n".join(lines)
+
+
+def _split_long(part: str, limit: int) -> list[str]:
+    """``part`` cut at line breaks into pieces no longer than ``limit`` (an option with many fights can overflow)."""
+    if len(part) <= limit:
+        return [part]
+    pieces: list[str] = []
+    current = ""
+    for line in part.split("\n"):
+        if current and len(current) + 1 + len(line) > limit:
+            pieces.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    pieces.append(current)
+    return pieces
 
 
 def _pack(parts: Sequence[str], limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
@@ -288,7 +444,7 @@ def _pack(parts: Sequence[str], limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]
     chunks: list[str] = []
     current: list[str] = []
     current_len = 0
-    for part in parts:
+    for part in (piece for whole in parts for piece in _split_long(whole, limit)):
         added = len(part) + (2 if current else 0)
         if current and current_len + added > limit:
             chunks.append("\n\n".join(current))
@@ -302,18 +458,70 @@ def _pack(parts: Sequence[str], limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]
     return chunks or [""]
 
 
+def _best_line(comparisons: Sequence[SimComparison], role: str) -> str:
+    """Which option to take, e.g. ``Best: Seal of Rivendare in Ring 2 (instead of Rosewine Circle)``."""
+    scores = [_score(comparison, role) for comparison in comparisons]
+    best = max(range(len(comparisons)), key=scores.__getitem__)
+    changes = comparisons[best].changes
+    if len(changes) != 1:
+        return f"**Best: Option {best + 1}**"
+    change = changes[0]
+    instead = f" (instead of {change.from_item.name})" if change.from_item else ""
+    return f"**Best: {change.to_item.name} in {SLOT_LABELS.get(change.slot, change.slot)}**{instead}"
+
+
 def format_sim_results(result: SimResult) -> list[str]:
     """``result`` as one or more message bodies (each under Discord's 2000-char limit), in posting order.
 
-    A ring or trinket posted without a slot comes back as one comparison per slot; those get "Option N" headings.
+    A ring or trinket posted without a slot comes back as one comparison per slot; those get "Option N" headings
+    and a line naming the best one.
     """
-    header = f"**{result.character}** — {result.class_name.title()} {result.spec.title()} ({result.role})"
-    several = len(result.comparisons) > 1
+    header = f"**{result.character}** · {result.spec.title()} {result.class_name.title()} ({result.role})"
+    comparisons = result.comparisons
+    several = len(comparisons) > 1
+    if several:
+        header += f"\n{_best_line(comparisons, result.role)}"
     blocks = [
         build_comparison_block(comparison, result.role, heading=f"Option {i}" if several else None)
-        for i, comparison in enumerate(result.comparisons, start=1)
+        for i, comparison in enumerate(comparisons, start=1)
     ]
     return _pack([header, *blocks, build_footer(result)])
+
+
+def _chart_text(row: SimRow, metric: _Metric) -> str:
+    value = getattr(row.delta_pct, metric.key)
+    if value is None or metric.key in row.noise or round(value, 1) == 0:
+        return "about the same"
+    return f"{abs(value):.1f}% {'more' if value > 0 else 'less'}"
+
+
+def chart_panels(result: SimResult) -> list[Panel]:
+    """``result`` as chart panels: one per option, one group per metric, one bar per fight."""
+    panels: list[Panel] = []
+    several = len(result.comparisons) > 1
+    for index, comparison in enumerate(result.comparisons, start=1):
+        new, old = _names(comparison)
+        title = f"{new} vs {old}"
+        if several:
+            title = f"Option {index}: {title}"
+        show_mob = len({row.mob for row in comparison.rows}) > 1
+        groups = [
+            MetricGroup(
+                title=metric.noun.capitalize(),
+                bars=[
+                    Bar(
+                        label=_fight_label(row, show_mob=show_mob),
+                        value=0.0 if _effect(row, metric) == "same" else _oriented(row, metric) or 0.0,
+                        text=_chart_text(row, metric),
+                        effect=_effect(row, metric),
+                    )
+                    for row in comparison.rows
+                ],
+            )
+            for metric in _metrics(result.role)
+        ]
+        panels.append(Panel(title=title, groups=groups))
+    return panels
 
 
 class SimCog(commands.Cog):
@@ -417,7 +625,11 @@ class SimCog(commands.Cog):
     @staticmethod
     async def _post_results(message: discord.Message, reply: discord.Message, result: SimResult) -> None:
         chunks = format_sim_results(result)
-        await reply.edit(content=chunks[0])
+        files: list[discord.File] = []
+        if result.comparisons:
+            png = await asyncio.to_thread(render_chart, chart_panels(result))
+            files.append(discord.File(io.BytesIO(png), filename=CHART_FILENAME))
+        await reply.edit(content=chunks[0], attachments=files)
         for chunk in chunks[1:]:
             await message.reply(chunk, mention_author=False)
 

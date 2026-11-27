@@ -531,7 +531,7 @@ class TestBuildStarterMessage:
         assert "Drive details: " in message
         assert "👑 <@123> — 1 qualified · 2 potential · 3 invited" in message
         assert "Payouts settle <t:" in message
-        assert "Whoever brings in the most recruits who stay 7 days and reach level 10 wins 1g" in message
+        assert "Whoever brings in the most recruits who stay 7 days and reach level 10 wins 10g" in message
         assert len(message) <= 2000
 
     def test_recruitment_drive_with_many_leaders_still_fits(self) -> None:
@@ -593,7 +593,7 @@ class TestBuildRecruitmentLeaderboard:
         board = build_recruitment_leaderboard(tally, max_len=400)
         assert len(board) <= 400
         assert "more" in board
-        assert "Whoever brings in the most recruits who stay 7 days and reach level 10 wins 1g" in board
+        assert "Whoever brings in the most recruits who stay 7 days and reach level 10 wins 10g" in board
 
     def test_crowns_every_tied_leader_at_the_top(self) -> None:
         tally = RecruitmentTally(

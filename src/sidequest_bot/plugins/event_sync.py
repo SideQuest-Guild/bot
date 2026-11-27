@@ -179,7 +179,7 @@ def build_counts_line(push: DiscordEventPush) -> str:
 
 RECRUITMENT_RULES_LINE = (
     "Invite new players to the guild. Whoever brings in the most recruits who stay 7 days and reach level 10 "
-    "wins 1g, and ties each win 1g. Payouts go out a week after the drive ends."
+    "wins 10g, and ties each win 10g. Payouts go out a week after the drive ends."
 )
 
 

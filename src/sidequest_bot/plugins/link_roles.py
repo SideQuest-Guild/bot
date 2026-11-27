@@ -16,8 +16,11 @@ their role. The same loop also applies every
 pending Discord role reset (``GET .../role-resets``): a member who deleted their site account gets every role the
 bot can manage stripped and the gate role (re)granted immediately, landing them back behind #sign-the-ledger. The
 moment a member is granted the site link role, they're DMed a one-time welcome
-(``guest_welcome.send_guest_welcome_dm``). The bot is the only thing that talks to Discord about these roles; the
-API only reports who is signed in/linked/confirmed/pending a reset.
+(``guest_welcome.send_guest_welcome_dm``). The same pass makes one nickname call per member, once the site knows a
+guild character of theirs: no nickname yet becomes the character they joined the guild on, an existing one is kept,
+and either way it's recorded (``POST .../member-links/{discord_id}/character-nick``) and never made again, so they
+can rename themselves. Members from before this existed are recorded already. The bot is the only thing that talks
+to Discord about these roles; the API only reports who is signed in/linked/confirmed/pending a reset.
 """
 
 import logging
@@ -176,6 +179,24 @@ def rank_grant_block_reason(role: discord.Role) -> str | None:
     return None
 
 
+NICK_MAX = 32  # Discord's nickname length limit
+
+
+def plan_character_nick(link: MemberLink | None, current_nick: str | None) -> tuple[bool, str | None]:
+    """The bot's one nickname call for a member: ``(decide_now, nickname_to_set)``.
+
+    Nothing until the site knows a guild character of theirs, and nothing ever again once the call is recorded
+    (``character_nick_done``), so they can rename themselves freely. A member who already has a nickname keeps it:
+    the call is recorded without a change. Otherwise their nickname becomes the character they joined the guild on
+    (``guild_characters[0]``).
+    """
+    if link is None or link.character_nick_done or not link.guild_characters:
+        return False, None
+    if current_nick:
+        return True, None
+    return True, link.guild_characters[0][:NICK_MAX]
+
+
 class LinkRolesCog(commands.Cog):
     """Periodic role sync plus the join/screening listeners and the ``/linkroles`` admin group."""
 
@@ -190,6 +211,7 @@ class LinkRolesCog(commands.Cog):
         self.bot = bot
         self._not_site_guild_ids: set[int] = set()
         self._warned_role_ids: set[tuple[int, int]] = set()
+        self._warned_nick_guild_ids: set[int] = set()
         self._sync_loop.start()
 
     async def cog_unload(self) -> None:
@@ -232,6 +254,7 @@ class LinkRolesCog(commands.Cog):
             if member.bot:
                 continue
             await self._apply_member(guild, member, config, links_by_discord_id)
+            await self._apply_character_nick(guild, member, links_by_discord_id.get(member.id))
         await self._process_role_resets(guild, config)
 
     async def _fetch_links(self, guild_id: int) -> dict[int, MemberLink]:
@@ -320,6 +343,35 @@ class LinkRolesCog(commands.Cog):
                 await member.remove_roles(*remove_roles, reason="Link roles sync")
             except discord.HTTPException:
                 logger.warning("Failed to remove link role(s) from %s in guild %s", member.id, guild.id, exc_info=True)
+
+    async def _apply_character_nick(
+        self, guild: discord.Guild, member: discord.Member, link: MemberLink | None
+    ) -> None:
+        """Make the one nickname call for ``member`` (``plan_character_nick``), then record it with the API."""
+        decide, nick = plan_character_nick(link, member.nick)
+        if not decide:
+            return
+        if nick is not None:
+            me = guild.me
+            if not me.guild_permissions.manage_nicknames:
+                if guild.id not in self._warned_nick_guild_ids:
+                    self._warned_nick_guild_ids.add(guild.id)
+                    logger.warning("Can't set character nicknames in guild %s: missing Manage Nicknames", guild.id)
+                return  # not recorded: it happens once the permission is granted
+            self._warned_nick_guild_ids.discard(guild.id)
+            # Discord never lets the bot rename the owner or anyone ranked at or above it: record the call anyway,
+            # so it isn't retried every minute.
+            if member.id != guild.owner_id and member.top_role < me.top_role:
+                try:
+                    await member.edit(nick=nick, reason="Named after the guild character they joined on")
+                except discord.HTTPException:
+                    logger.warning("Failed to set %s's nickname in guild %s", member.id, guild.id, exc_info=True)
+                    return
+        try:
+            await self.bot.api.mark_character_nick(guild.id, member.id)
+        except APIError:
+            # Retried next tick: by then they have a nickname, so that only records the call.
+            logger.warning("Failed to record %s's character nickname in guild %s", member.id, guild.id, exc_info=True)
 
     async def _apply_rank_roles(
         self,

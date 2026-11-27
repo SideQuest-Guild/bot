@@ -660,6 +660,10 @@ class SideQuestAPI:
         data = await self._request("GET", f"{self._guild(guild_id)}/member-links")
         return _parse(_MEMBER_LINKS.validate_python, data)
 
+    async def mark_character_nick(self, guild_id: int, discord_id: int) -> None:
+        """Record the bot's one character-nickname call for ``discord_id``; it never renames them again."""
+        await self._request("POST", f"{self._guild(guild_id)}/member-links/{discord_id}/character-nick")
+
     async def confirm_discord_member(
         self, guild_id: int, discord_id: int, request: DiscordRosterConfirmRequest
     ) -> MemberLink:

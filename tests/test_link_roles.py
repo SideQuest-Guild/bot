@@ -100,6 +100,7 @@ def _make_cog(*, api: object | None = None, configs: object | None = None, guild
     cog.bot = SimpleNamespace(api=api, configs=configs or AsyncMock(), guilds=guilds or [])
     cog._not_site_guild_ids = set()
     cog._warned_role_ids = set()
+    cog._warned_nick_guild_ids = set()
     return cog
 
 
@@ -1254,3 +1255,101 @@ class TestConfirmInGuildContextMenu:
             await link_roles_module.confirm_in_guild.callback(interaction, target)
 
         cog.confirm_discord_member.assert_awaited_once_with(interaction, target, clicker)
+
+
+class TestCharacterNick:
+    """One nickname call per member: their joined-on character when they have no nickname, recorded either way."""
+
+    @staticmethod
+    def _guild(*, manage_nicknames: bool = True, owner_id: int = 999) -> MagicMock:
+        guild = _fake_guild()
+        guild.owner_id = owner_id
+        guild.me = SimpleNamespace(
+            guild_permissions=discord.Permissions(manage_nicknames=manage_nicknames), top_role=10
+        )
+        return guild
+
+    @staticmethod
+    def _member(*, nick: str | None = None, top_role: int = 1) -> MagicMock:
+        member = _fake_member(1)
+        member.nick = nick
+        member.top_role = top_role
+        member.edit = AsyncMock()
+        return member
+
+    @staticmethod
+    def _link(**overrides: object) -> MemberLink:
+        fields: dict[str, object] = {
+            "discord_id": 1,
+            "battlenet_linked": True,
+            "guild_characters": ["Legs Behindhead", "Warren Buffetts"],
+            "character_nick_done": False,
+        }
+        fields.update(overrides)
+        return MemberLink.model_validate(fields)
+
+    async def _sync(self, guild: MagicMock, member: MagicMock, link: MemberLink) -> AsyncMock:
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config()
+        api = AsyncMock()
+        api.list_member_links.return_value = [link]
+        await _make_cog(api=api, configs=configs)._sync_guild(guild)
+        return api
+
+    async def test_no_nickname_becomes_the_character_they_joined_on(self) -> None:
+        guild, member = self._guild(), self._member()
+        api = await self._sync(guild, member, self._link())
+        member.edit.assert_awaited_once_with(
+            nick="Legs Behindhead", reason="Named after the guild character they joined on"
+        )
+        api.mark_character_nick.assert_awaited_once_with(42, 1)
+
+    async def test_an_existing_nickname_is_kept_and_the_call_recorded(self) -> None:
+        guild, member = self._guild(), self._member(nick="Legsy")
+        api = await self._sync(guild, member, self._link())
+        member.edit.assert_not_awaited()
+        api.mark_character_nick.assert_awaited_once_with(42, 1)
+
+    @pytest.mark.parametrize(
+        "overrides", [{"character_nick_done": True}, {"guild_characters": []}], ids=["already-done", "no-characters"]
+    )
+    async def test_nothing_once_done_or_before_a_character_is_known(self, overrides: dict[str, object]) -> None:
+        guild, member = self._guild(), self._member()
+        api = await self._sync(guild, member, self._link(**overrides))
+        member.edit.assert_not_awaited()
+        api.mark_character_nick.assert_not_awaited()
+
+    async def test_owner_or_member_above_the_bot_is_recorded_without_a_rename(self) -> None:
+        for guild, member in ((self._guild(owner_id=1), self._member()), (self._guild(), self._member(top_role=10))):
+            api = await self._sync(guild, member, self._link())
+            member.edit.assert_not_awaited()
+            api.mark_character_nick.assert_awaited_once_with(42, 1)
+
+    async def test_without_manage_nicknames_nothing_is_recorded_and_it_warns_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        guild, member = self._guild(manage_nicknames=False), self._member()
+        guild.members = [member]
+        configs = AsyncMock()
+        configs.get.return_value = _config()
+        api = AsyncMock()
+        api.list_member_links.return_value = [self._link()]
+        cog = _make_cog(api=api, configs=configs)
+        with caplog.at_level(logging.WARNING):
+            await cog._sync_guild(guild)
+            await cog._sync_guild(guild)
+        member.edit.assert_not_awaited()
+        api.mark_character_nick.assert_not_awaited()
+        assert sum("Manage Nicknames" in record.message for record in caplog.records) == 1
+
+    async def test_a_failed_rename_is_not_recorded_so_it_retries(self) -> None:
+        guild, member = self._guild(), self._member()
+        member.edit.side_effect = discord.HTTPException(Mock(status=500), "boom")
+        api = await self._sync(guild, member, self._link())
+        api.mark_character_nick.assert_not_awaited()
+
+    async def test_a_long_character_name_is_cut_to_discords_32_characters(self) -> None:
+        guild, member = self._guild(), self._member()
+        await self._sync(guild, member, self._link(guild_characters=["A" * 20 + " " + "B" * 20]))
+        assert len(member.edit.await_args.kwargs["nick"]) == 32

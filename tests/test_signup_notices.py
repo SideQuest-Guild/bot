@@ -120,6 +120,21 @@ class TestApplyApprovalStatus:
         status_field = next(f for f in updated.fields if f.name == STATUS_FIELD_NAME)
         assert status_field.value == "Approved by @gm"
 
+    def test_characters_the_roster_learned_since_are_added_before_status_and_later_replaced(self) -> None:
+        """A guest's notice posts before their characters are known; the confirmation edit names them."""
+        embed = build_notice_embed(_candidate())
+        assert [f.name for f in embed.fields if f.name == "Characters"] == []
+        updated = apply_approval_status(embed, "Approved by @gm", ["Nox Zul", "Brista Zul"])
+        names = [f.name for f in updated.fields]
+        assert names.index("Characters") == names.index(STATUS_FIELD_NAME) - 1
+        assert next(f for f in updated.fields if f.name == "Characters").value == "Nox Zul, Brista Zul"
+        again = apply_approval_status(updated, "Approved by @gm", ["Nox Zul"])
+        assert [f.value for f in again.fields if f.name == "Characters"] == ["Nox Zul"]
+
+    def test_notice_names_known_characters_joined_on_first(self) -> None:
+        embed = build_notice_embed(_candidate(guild_characters=["Legs Behindhead", "Warren Buffetts"]))
+        assert next(f for f in embed.fields if f.name == "Characters").value == "Legs Behindhead, Warren Buffetts"
+
 
 class TestBuildNoticeView:
     def test_has_approve_and_link_buttons(self) -> None:

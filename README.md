@@ -28,6 +28,9 @@ lives there.
   Master*, *Quest Guide*, *Expedition Leader*) come only from characters their own linked Battle.net account owns, so
   no addon upload or site link can make someone an officer. Members with no character on the roster keep the rank
   roles they have.
+- **Named after your character.** The first time the site knows one of your characters on the guild roster, the bot
+  sets your server nickname to the one you joined the guild on, if you don't have a nickname yet. It does this once:
+  change it whenever you like. Members who were already here before this aren't renamed.
 - **Confirm in guild.** For someone who won't sign in on the website: a Quest Master right-clicks them, then Apps,
   then **Confirm in guild**, or approves a request posted from the gate (below). They get *New Arrival* without
   *Signed the Ledger*.

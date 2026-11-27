@@ -40,6 +40,8 @@ POLL_INTERVAL_SECONDS = 60
 CUSTOM_ID_RE: Final = re.compile(r"^sq:sn:approve:(?P<member_id>\d+)$")
 
 STATUS_FIELD_NAME = "Status"
+CHARACTERS_FIELD_NAME = "Characters"
+FIELD_VALUE_MAX = 1024  # Discord's embed field value limit
 GUEST_STATUS_TEXT = "Guest until a Quest Master approves."
 CONFIRMED_FROM_ROSTER_TEXT = "Confirmed automatically from the Battle.net guild roster."
 
@@ -82,8 +84,17 @@ def clicker_is_gm(role_ids: set[int], gm_role_ids: list[int]) -> bool:
     return bool(set(gm_role_ids) & role_ids)
 
 
+def characters_text(characters: list[str]) -> str:
+    """The Characters field: the one they joined the guild on first, then their other roster characters."""
+    text = ", ".join(characters)
+    return text if len(text) <= FIELD_VALUE_MAX else text[: FIELD_VALUE_MAX - 1] + "…"
+
+
 def build_notice_embed(candidate: SignupNoticeCandidate) -> discord.Embed:
-    """The notice embed for one new sign-in: name, avatar, BattleTag if linked, and a Guest/confirmed status field."""
+    """The notice embed for one new sign-in.
+
+    Name, avatar, BattleTag if linked, their guild characters if the roster knows any, and a Guest/confirmed status.
+    """
     embed = make_embed(
         "New signature in the Ledger",
         f"{candidate.display_name} (@{candidate.username})",
@@ -92,13 +103,26 @@ def build_notice_embed(candidate: SignupNoticeCandidate) -> discord.Embed:
     embed.set_thumbnail(url=avatar_url(int(candidate.discord_id), candidate.avatar_hash))
     if candidate.battletag:
         embed.add_field(name="BattleTag", value=candidate.battletag, inline=True)
+    if candidate.guild_characters:
+        embed.add_field(name=CHARACTERS_FIELD_NAME, value=characters_text(candidate.guild_characters), inline=False)
     status = CONFIRMED_FROM_ROSTER_TEXT if candidate.confirmed_from_roster else GUEST_STATUS_TEXT
     embed.add_field(name=STATUS_FIELD_NAME, value=status, inline=False)
     return embed
 
 
-def apply_approval_status(embed: discord.Embed, status_text: str) -> discord.Embed:
-    """Replace ``embed``'s Status field with ``status_text`` in place (appends one if somehow missing)."""
+def apply_approval_status(embed: discord.Embed, status_text: str, characters: list[str] | None = None) -> discord.Embed:
+    """Replace ``embed``'s Status field with ``status_text`` in place (appends one if somehow missing).
+
+    With ``characters``, also sets its Characters field (added before Status if the notice was posted without one).
+    """
+    if characters:
+        value = characters_text(characters)
+        index = next((i for i, f in enumerate(embed.fields) if f.name == CHARACTERS_FIELD_NAME), None)
+        if index is not None:
+            embed.set_field_at(index, name=CHARACTERS_FIELD_NAME, value=value, inline=False)
+        else:
+            status_at = next((i for i, f in enumerate(embed.fields) if f.name == STATUS_FIELD_NAME), len(embed.fields))
+            embed.insert_field_at(status_at, name=CHARACTERS_FIELD_NAME, value=value, inline=False)
     for index, field in enumerate(embed.fields):
         if field.name == STATUS_FIELD_NAME:
             embed.set_field_at(index, name=STATUS_FIELD_NAME, value=status_text, inline=False)
@@ -268,7 +292,7 @@ class SignupNoticesCog(commands.Cog):
         status_text = (
             CONFIRMED_FROM_ROSTER_TEXT if resolution.confirmed_from_roster else f"Approved on the site by {who}"
         )
-        updated_embed = apply_approval_status(message.embeds[0], status_text)
+        updated_embed = apply_approval_status(message.embeds[0], status_text, resolution.guild_characters)
         view = build_notice_view(
             resolution.member_id, more_info_url(_web_settings().BASE_URL, resolution.member_id), approved=True
         )

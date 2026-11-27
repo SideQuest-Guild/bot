@@ -1248,7 +1248,7 @@ wheels = [
 [[package]]
 name = "sidequest-api"
 version = "0.1.0"
-source = { git = "https://github.com/SideQuest-Guild/website?subdirectory=api&rev=0cdd2d0434c64bb6166b013d5e52e7d02f2c568e#0cdd2d0434c64bb6166b013d5e52e7d02f2c568e" }
+source = { git = "https://github.com/SideQuest-Guild/website?subdirectory=api&rev=669e3e0bd6e34fe4d9c5539962ff2985ff40634e#669e3e0bd6e34fe4d9c5539962ff2985ff40634e" }
 dependencies = [
     { name = "advanced-alchemy", extra = ["uuid"] },
     { name = "alembic" },
@@ -1297,7 +1297,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "pydantic", specifier = ">=2.14" },
     { name = "pydantic-settings", specifier = ">=2.16" },
-    { name = "sidequest-common", git = "https://github.com/SideQuest-Guild/website?subdirectory=packages%2Fsidequest-common&rev=0cdd2d0434c64bb6166b013d5e52e7d02f2c568e" },
+    { name = "sidequest-common", git = "https://github.com/SideQuest-Guild/website?subdirectory=packages%2Fsidequest-common&rev=669e3e0bd6e34fe4d9c5539962ff2985ff40634e" },
     { name = "tenacity", specifier = ">=9.2" },
 ]
 
@@ -1311,13 +1311,13 @@ dev = [
     { name = "pytest-socket", specifier = ">=0.7" },
     { name = "respx", specifier = ">=0.23" },
     { name = "ruff", specifier = ">=0.17" },
-    { name = "sidequest-api", git = "https://github.com/SideQuest-Guild/website?subdirectory=api&rev=0cdd2d0434c64bb6166b013d5e52e7d02f2c568e" },
+    { name = "sidequest-api", git = "https://github.com/SideQuest-Guild/website?subdirectory=api&rev=669e3e0bd6e34fe4d9c5539962ff2985ff40634e" },
 ]
 
 [[package]]
 name = "sidequest-common"
 version = "0.1.0"
-source = { git = "https://github.com/SideQuest-Guild/website?subdirectory=packages%2Fsidequest-common&rev=0cdd2d0434c64bb6166b013d5e52e7d02f2c568e#0cdd2d0434c64bb6166b013d5e52e7d02f2c568e" }
+source = { git = "https://github.com/SideQuest-Guild/website?subdirectory=packages%2Fsidequest-common&rev=669e3e0bd6e34fe4d9c5539962ff2985ff40634e#669e3e0bd6e34fe4d9c5539962ff2985ff40634e" }
 dependencies = [
     { name = "advanced-alchemy" },
     { name = "pydantic" },

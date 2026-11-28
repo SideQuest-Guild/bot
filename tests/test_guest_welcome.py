@@ -26,20 +26,22 @@ from sidequest_common.schemas import (
 )
 
 
-def _fake_channel(name: str, *, channel_id: int = 999) -> MagicMock:
-    channel = MagicMock(spec=discord.TextChannel)
-    channel.name = name
-    channel.mention = f"<#{channel_id}>"
-    return channel
+def _fake_post(name: str = "Choose your class", *, forum: str = "class-halls", thread_id: int = 999) -> MagicMock:
+    post = MagicMock(spec=discord.Thread)
+    post.name = name
+    post.parent = MagicMock(spec=discord.ForumChannel)
+    post.parent.name = forum
+    post.mention = f"<#{thread_id}>"
+    return post
 
 
-def _fake_member(*, display_name: str = "Pix", text_channels: list[MagicMock] | None = None) -> MagicMock:
+def _fake_member(*, display_name: str = "Pix", threads: list[MagicMock] | None = None) -> MagicMock:
     member = MagicMock(spec=discord.Member)
     member.id = 1
     member.display_name = display_name
     member.guild = MagicMock(spec=discord.Guild)
     member.guild.id = 42
-    member.guild.text_channels = text_channels or []
+    member.guild.threads = threads or []
     member.send = AsyncMock()
     return member
 
@@ -61,22 +63,22 @@ class TestBuildGuestWelcomeEmbed:
         embed = build_guest_welcome_embed(_fake_member(display_name="Pix"))
         assert "Pix" in embed.description
 
-    def test_mentions_guest_status_and_class_channel_and_events(self) -> None:
+    def test_mentions_guest_status_and_class_post_and_events(self) -> None:
         embed = build_guest_welcome_embed(_fake_member())
         assert "guest" in embed.description.lower()
         assert "Quest Master" in embed.description
-        assert "#choose-your-class" in embed.description
+        assert "the **Choose your class** post in #class-halls" in embed.description
         assert "https://sidequest-guild.com/events/" in embed.description
 
-    def test_links_the_class_channel_when_it_exists(self) -> None:
-        channel = _fake_channel("choose-your-class")
-        embed = build_guest_welcome_embed(_fake_member(text_channels=[channel]))
-        assert channel.mention in embed.description
-        assert "#choose-your-class" not in embed.description
+    def test_links_the_class_post_when_it_is_open(self) -> None:
+        post = _fake_post()
+        embed = build_guest_welcome_embed(_fake_member(threads=[post]))
+        assert post.mention in embed.description
+        assert "#class-halls" not in embed.description
 
-    def test_falls_back_to_plain_text_when_the_channel_is_missing(self) -> None:
-        embed = build_guest_welcome_embed(_fake_member(text_channels=[_fake_channel("general")]))
-        assert "#choose-your-class" in embed.description
+    def test_ignores_a_same_named_post_in_another_forum(self) -> None:
+        embed = build_guest_welcome_embed(_fake_member(threads=[_fake_post(forum="events")]))
+        assert "the **Choose your class** post in #class-halls" in embed.description
 
     def test_no_in_game_invite_instructions(self) -> None:
         embed = build_guest_welcome_embed(_fake_member())
@@ -203,15 +205,15 @@ class TestGuestWelcomeButtonCallback:
         assert kwargs["ephemeral"] is True
         assert "Pix" in kwargs["embed"].description
 
-    async def test_links_the_class_channel_when_it_exists(self) -> None:
+    async def test_links_the_class_post_when_it_is_open(self) -> None:
         button = GuestWelcomeButton()
-        channel = _fake_channel("choose-your-class")
-        interaction = _fake_interaction(user=_fake_member(text_channels=[channel]))
+        post = _fake_post()
+        interaction = _fake_interaction(user=_fake_member(threads=[post]))
 
         await button.callback(interaction)
 
         _, kwargs = interaction.followup.send.call_args
-        assert channel.mention in kwargs["embed"].description
+        assert post.mention in kwargs["embed"].description
 
     async def test_includes_recruiting_field_when_set(self) -> None:
         button = GuestWelcomeButton()

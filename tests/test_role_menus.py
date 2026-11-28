@@ -291,3 +291,30 @@ class TestAddCommandRequiresGrantAndConfigureChecks:
             await RoleMenusCog.add.callback(cog, interaction, str(uuid4()), role, "Label")
         bot.api.upsert_role_menu_option.assert_awaited_once()
         interaction.followup.send.assert_awaited_once()
+
+
+class TestMoveCommand:
+    async def test_moves_the_menu_into_a_forum_post(self) -> None:
+        menu = _make_menu([]).model_copy(update={"message_id": 50})
+        moved = menu.model_copy(update={"channel_id": 3, "message_id": None})
+        reposted = moved.model_copy(update={"message_id": 60})
+        old_message = Mock(delete=AsyncMock())
+        old_channel = Mock(spec=discord.TextChannel, fetch_message=AsyncMock(return_value=old_message))
+        post = Mock(spec=discord.Thread, id=3, mention="<#3>", archived=True, edit=AsyncMock())
+        post.send = AsyncMock(return_value=Mock(id=60))
+        bot = Mock()
+        bot.api.get_role_menu = AsyncMock(return_value=menu)
+        bot.api.update_role_menu = AsyncMock(side_effect=[moved, reposted])
+        interaction = _make_cog_interaction()
+        interaction.guild.get_channel_or_thread.side_effect = {2: old_channel, 3: post}.get
+
+        await RoleMenusCog.move.callback(RoleMenusCog(bot), interaction, str(menu.id), post)
+
+        old_channel.fetch_message.assert_awaited_once_with(50)
+        old_message.delete.assert_awaited_once()
+        first_update = bot.api.update_role_menu.await_args_list[0].args[2]
+        assert first_update.model_dump(exclude_unset=True) == {"channel_id": 3, "message_id": None}
+        post.edit.assert_awaited_once_with(archived=False)
+        post.send.assert_awaited_once()
+        assert bot.api.update_role_menu.await_args_list[1].args[2].message_id == 60
+        assert "<#3>" in interaction.followup.send.await_args.args[0]

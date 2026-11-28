@@ -77,7 +77,7 @@ def _fake_member(
     member.add_roles = AsyncMock()
     member.remove_roles = AsyncMock()
     member.send = AsyncMock()
-    member.guild = SimpleNamespace(id=42, text_channels=[])
+    member.guild = SimpleNamespace(id=42, threads=[])
     member.name = f"member{member_id}"
     member.display_name = f"member{member_id}"
     member.global_name = None

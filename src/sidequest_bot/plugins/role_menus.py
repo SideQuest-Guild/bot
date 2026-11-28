@@ -210,12 +210,25 @@ class RoleMenuButton(discord.ui.DynamicItem[discord.ui.Button], template=CUSTOM_
         return f"Removed {role.mention}." if has_role else f"Added {role.mention}."
 
 
+async def _menu_channel(guild: discord.Guild, channel_id: int) -> discord.TextChannel | discord.Thread | None:
+    """The text channel or thread (a forum post, say) a menu lives in, fetched if it isn't cached; else ``None``."""
+    channel = guild.get_channel_or_thread(channel_id)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(channel_id)
+        except discord.HTTPException:
+            return None
+    return channel if isinstance(channel, (discord.TextChannel, discord.Thread)) else None
+
+
 async def _sync_menu_message(bot: SideQuestBot, guild: discord.Guild, menu: RoleMenuSchema) -> RoleMenuSchema:
     """Post the menu's message if it has none yet, edit it in place, or re-post if it was deleted."""
-    channel = guild.get_channel(menu.channel_id)
-    if not isinstance(channel, discord.TextChannel):
-        logger.warning("Role menu %s channel %s is missing or not a text channel", menu.id, menu.channel_id)
+    channel = await _menu_channel(guild, menu.channel_id)
+    if channel is None:
+        logger.warning("Role menu %s channel %s is missing or not a text channel or thread", menu.id, menu.channel_id)
         return menu
+    if isinstance(channel, discord.Thread) and channel.archived:
+        await channel.edit(archived=False)
     embed = render_menu_embed(menu)
     view = build_menu_view(menu)
     if menu.message_id is not None:
@@ -228,6 +241,17 @@ async def _sync_menu_message(bot: SideQuestBot, guild: discord.Guild, menu: Role
             return menu
     posted = await channel.send(embed=embed, view=view)
     return await bot.api.update_role_menu(guild.id, menu.id, RoleMenuUpdate(message_id=posted.id))
+
+
+async def _delete_menu_message(guild: discord.Guild, menu: RoleMenuSchema) -> None:
+    """Delete the menu's posted message, if it has one and it still exists."""
+    if menu.message_id is None or (channel := await _menu_channel(guild, menu.channel_id)) is None:
+        return
+    try:
+        message = await channel.fetch_message(menu.message_id)
+        await message.delete()
+    except discord.HTTPException:
+        logger.warning("Could not delete message for role menu %s", menu.id, exc_info=True)
 
 
 def _require_guild(interaction: discord.Interaction[SideQuestBot]) -> discord.Guild:
@@ -286,7 +310,7 @@ class RoleMenusCog(commands.Cog):
     async def create(
         self,
         interaction: discord.Interaction[SideQuestBot],
-        channel: discord.TextChannel,
+        channel: discord.TextChannel | discord.Thread,
         title: str,
         description: str | None = None,
         max_roles: app_commands.Range[int, 0, 25] = 0,
@@ -385,16 +409,29 @@ class RoleMenusCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         menu_id = UUID(menu)
         existing = await self.bot.api.get_role_menu(guild.id, menu_id)
-        if existing.message_id is not None:
-            channel = guild.get_channel(existing.channel_id)
-            if isinstance(channel, discord.TextChannel):
-                try:
-                    message = await channel.fetch_message(existing.message_id)
-                    await message.delete()
-                except discord.HTTPException:
-                    logger.warning("Could not delete message for role menu %s", menu_id, exc_info=True)
+        await _delete_menu_message(guild, existing)
         await self.bot.api.delete_role_menu(guild.id, menu_id)
         await interaction.followup.send(f"Deleted **{existing.title}**.", ephemeral=True)
+
+    @rolemenu.command(name="move", description="Move a menu to another channel or forum post.")
+    @app_commands.describe(menu="The role menu", channel="Channel or forum post to post the menu in instead")
+    @app_commands.autocomplete(menu=_autocomplete_menu)
+    async def move(
+        self,
+        interaction: discord.Interaction[SideQuestBot],
+        menu: str,
+        channel: discord.TextChannel | discord.Thread,
+    ) -> None:
+        """Delete the menu's message where it is now and post it in ``channel``; its buttons keep working."""
+        guild = _require_guild(interaction)
+        await interaction.response.defer(ephemeral=True)
+        current = await self.bot.api.get_role_menu(guild.id, UUID(menu))
+        await _delete_menu_message(guild, current)
+        moved = await self.bot.api.update_role_menu(
+            guild.id, current.id, RoleMenuUpdate(channel_id=channel.id, message_id=None)
+        )
+        await _sync_menu_message(self.bot, guild, moved)
+        await interaction.followup.send(f"Moved **{moved.title}** to {channel.mention}.", ephemeral=True)
 
     @rolemenu.command(name="list", description="List this guild's role menus.")
     async def list_menus(self, interaction: discord.Interaction[SideQuestBot]) -> None:

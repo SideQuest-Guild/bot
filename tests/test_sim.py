@@ -8,10 +8,10 @@ from uuid import uuid4
 import discord
 
 from sidequest_bot.api_client import APIError, SimChange, SimComparison, SimItem, SimJob, SimMetrics, SimResult, SimRow
+from sidequest_bot.lib.forums import CLASS_HALLS_FORUM
 from sidequest_bot.lib.sim_chart import render_chart
 from sidequest_bot.plugins.sim import (
     CHART_FILENAME,
-    FORUM_NAME,
     POST_NAME,
     USAGE,
     ParsedSim,
@@ -356,7 +356,7 @@ class TestChartPanels:
 # --- cog behavior
 
 
-def _forum(name: str = FORUM_NAME, threads: list | None = None, archived: list | None = None) -> MagicMock:
+def _forum(name: str = CLASS_HALLS_FORUM, threads: list | None = None, archived: list | None = None) -> MagicMock:
     forum = MagicMock(spec=discord.ForumChannel)
     forum.name = name
     forum.threads = threads or []

@@ -11,6 +11,9 @@ people follow halls on their own (or by posting in them), and that's theirs to k
 A class's hall also gets a pinned post of the guides the guild recommends (``lib/class_guides.py``), posted when the
 hall appears and edited by the sweep when the list changes. The WoW: Forever feed posts each class's hotfixes into
 its hall through :meth:`ClassHallsCog.find_hall`.
+
+The sweep also keeps a pinned **Choose your class** post at the top of the class-halls forum, where the class role
+menu lives (moved there with ``/rolemenu move``).
 """
 
 import logging
@@ -22,6 +25,7 @@ from discord.ext import commands, tasks
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.class_guides import CLASS_GUIDES
 from sidequest_bot.lib.embeds import link_button
+from sidequest_bot.lib.forums import CLASS_HALLS_FORUM, find_post
 from sidequest_bot.plugins.characters import class_color
 
 logger = logging.getLogger(__name__)
@@ -30,6 +34,11 @@ HALL_SUFFIX: Final = " Hall"
 SWEEP_INTERVAL_HOURS: Final = 6
 GUIDES_HISTORY_LIMIT: Final = 100
 """Recent hall messages searched for the guides post when it isn't among the pins (pinning failed)."""
+CHOOSER_POST_NAME: Final = "Choose your class"
+CHOOSER_INTRO: Final = (
+    "Click your class below to get its role. It also adds you to your class's hall in this forum, where the guild's "
+    "recommended guides and Blizzard's hotfixes for your class are posted. Click it again to drop the role."
+)
 
 
 def hall_name(role_name: str) -> str:
@@ -232,6 +241,31 @@ class ClassHallsCog(commands.Cog):
             for name, hall in halls.items():
                 if (wow_class := name.removesuffix(HALL_SUFFIX)) in CLASS_GUIDES:
                     await self._sync_guides(hall, wow_class)
+            await self._sync_chooser(guild)
+
+    async def _sync_chooser(self, guild: discord.Guild) -> None:
+        """Create the class picker post in the class-halls forum if it's missing, reopen it, and keep it pinned.
+
+        A forum has one pinned post, so another pinned post is unpinned first. The class role menu itself goes in
+        with ``/rolemenu move``; this only keeps the post.
+        """
+        forum = discord.utils.get(guild.forums, name=CLASS_HALLS_FORUM)
+        if forum is None:
+            return
+        try:
+            post = await find_post(forum, CHOOSER_POST_NAME)
+            if post is None:
+                post = (await forum.create_thread(name=CHOOSER_POST_NAME, content=CHOOSER_INTRO)).thread
+            elif not await self.reopen(post):
+                return
+            if post.flags.pinned:
+                return
+            for other in forum.threads:
+                if other.id != post.id and other.flags.pinned:
+                    await other.edit(pinned=False)
+            await post.edit(pinned=True)
+        except discord.HTTPException:
+            logger.warning("Couldn't keep the %s post in guild %s", CHOOSER_POST_NAME, guild.id, exc_info=True)
 
     @_sweep_loop.before_loop
     async def _before_sweep_loop(self) -> None:

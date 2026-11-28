@@ -7,7 +7,14 @@ import discord
 import pytest
 
 from sidequest_bot.lib.class_guides import CLASS_GUIDES, WOW_CLASSES
-from sidequest_bot.plugins.class_halls import ClassHallsCog, guides_embed, guides_view, view_buttons
+from sidequest_bot.plugins.class_halls import (
+    CHOOSER_INTRO,
+    CHOOSER_POST_NAME,
+    ClassHallsCog,
+    guides_embed,
+    guides_view,
+    view_buttons,
+)
 
 GUILD_ID = 42
 BOT_ID = 1
@@ -90,6 +97,51 @@ def _guides_post(embed: discord.Embed, view: discord.ui.View) -> MagicMock:
     post.components = [row]
     post.edit = AsyncMock()
     return post
+
+
+def _post(name: str, *, pinned: bool = False) -> MagicMock:
+    post = MagicMock(spec=discord.Thread)
+    post.id = hash(name) % 1000
+    post.name = name
+    post.archived = False
+    post.flags = SimpleNamespace(pinned=pinned)
+    post.edit = AsyncMock()
+    return post
+
+
+def _forum(threads: list[MagicMock], created: MagicMock | None = None) -> MagicMock:
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.name = "class-halls"
+    forum.threads = threads
+    forum.archived_threads = _messages([])
+    forum.create_thread = AsyncMock(return_value=SimpleNamespace(thread=created))
+    return forum
+
+
+class TestChooserPost:
+    async def test_creates_and_pins_it_and_unpins_the_other_pinned_post(self) -> None:
+        sims = _post("Gear sims", pinned=True)
+        chooser = _post(CHOOSER_POST_NAME)
+        forum = _forum([sims], created=chooser)
+        guild = _guild([], [])
+        guild.forums = [forum]
+
+        await _cog(guild)._sweep_loop.coro(_cog(guild))
+
+        forum.create_thread.assert_awaited_once_with(name=CHOOSER_POST_NAME, content=CHOOSER_INTRO)
+        sims.edit.assert_awaited_once_with(pinned=False)
+        chooser.edit.assert_awaited_once_with(pinned=True)
+
+    async def test_leaves_it_alone_when_already_pinned(self) -> None:
+        chooser = _post(CHOOSER_POST_NAME, pinned=True)
+        forum = _forum([chooser])
+        guild = _guild([], [])
+        guild.forums = [forum]
+
+        await _cog(guild)._sweep_loop.coro(_cog(guild))
+
+        forum.create_thread.assert_not_awaited()
+        chooser.edit.assert_not_awaited()
 
 
 async def test_gaining_a_class_follows_its_hall_and_losing_it_unfollows() -> None:

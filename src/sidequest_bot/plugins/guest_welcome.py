@@ -23,6 +23,8 @@ from discord.ext import commands
 from sidequest_bot.api_client import APIError, SideQuestAPI
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
 from sidequest_bot.lib.embeds import Colors, make_embed, truncate
+from sidequest_bot.lib.forums import CLASS_HALLS_FORUM
+from sidequest_bot.plugins.class_halls import CHOOSER_POST_NAME
 from sidequest_common.schemas import Recruiting, RecruitingPriority
 
 logger = logging.getLogger(__name__)
@@ -30,16 +32,22 @@ logger = logging.getLogger(__name__)
 CUSTOM_ID: Final = "sq:welcome"
 CUSTOM_ID_RE: Final = re.compile(r"^sq:welcome$")
 
-CHOOSE_CLASS_CHANNEL_NAME = "choose-your-class"
 EVENTS_URL = "https://sidequest-guild.com/events/"
 
 PINNED_POST_CONTENT = "New here? Click below for a quick welcome and pointers to get started."
 
 
-def _choose_class_channel_mention(guild: discord.Guild) -> str:
-    """``#choose-your-class``'s mention if the channel exists in ``guild``, else the plain ``#name`` text."""
-    channel = discord.utils.get(guild.text_channels, name=CHOOSE_CLASS_CHANNEL_NAME)
-    return channel.mention if channel is not None else f"#{CHOOSE_CLASS_CHANNEL_NAME}"
+def _class_chooser_mention(guild: discord.Guild) -> str:
+    """The **Choose your class** post's mention if it's open in ``guild``, else its name and forum as plain text."""
+    for thread in guild.threads:
+        parent = thread.parent
+        if (
+            thread.name == CHOOSER_POST_NAME
+            and isinstance(parent, discord.ForumChannel)
+            and parent.name == CLASS_HALLS_FORUM
+        ):
+            return thread.mention
+    return f"the **{CHOOSER_POST_NAME}** post in #{CLASS_HALLS_FORUM}"
 
 
 def _recruiting_field_text(recruiting: Recruiting) -> str | None:
@@ -77,7 +85,7 @@ def build_guest_welcome_embed(member: discord.Member, recruiting: Recruiting | N
         f"Hey {member.display_name}, welcome! You're in as a guest for now. Link Battle.net with a character "
         f"already in the guild and you're confirmed automatically; otherwise a Quest Master will confirm you soon."
         f"\n\n"
-        f"Head to {_choose_class_channel_mention(member.guild)} to pick a class role, and keep an eye on "
+        f"Head to {_class_chooser_mention(member.guild)} to pick a class role, and keep an eye on "
         f"{EVENTS_URL} for upcoming raids and events."
     )
     embed = make_embed("Welcome to the guild!", description, color=Colors.GOLD)

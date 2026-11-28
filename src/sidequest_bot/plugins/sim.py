@@ -1,6 +1,6 @@
 """Gear-swap sims: messages in the "Gear sims" post of the ``#class-halls`` forum queue a sim through the API.
 
-The bot keeps one post named :data:`POST_NAME` in the forum named :data:`FORUM_NAME` (the class halls), creating it
+The bot keeps one post named :data:`POST_NAME` in the class-halls forum (:data:`CLASS_HALLS_FORUM`), creating it
 with :data:`USAGE` as its first message when it's missing and reopening it when Discord archives it. Every member
 message in that post is a sim request: its first line is the character's name and surname (``Nox Zul``); every
 following line is either an item to try (a Wowhead link, a numeric item id, or an item name, optionally prefixed
@@ -45,6 +45,7 @@ from sidequest_bot.api_client import (
     SimRow,
 )
 from sidequest_bot.bot import SideQuestBot  # noqa: TC001  # discord.py evaluates app-command annotations at runtime
+from sidequest_bot.lib.forums import CLASS_HALLS_FORUM, find_post
 from sidequest_bot.lib.sim_chart import Bar, Effect, MetricGroup, Panel, render_chart
 from sidequest_bot.plugins.items import WOWHEAD_URL
 
@@ -53,7 +54,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FORUM_NAME = "class-halls"
 POST_NAME = "Gear sims"
 SWEEP_INTERVAL_HOURS = 6
 POLL_INTERVAL_SECONDS = 5
@@ -545,28 +545,18 @@ class SimCog(commands.Cog):
             isinstance(channel, discord.Thread)
             and channel.name == POST_NAME
             and isinstance(channel.parent, discord.ForumChannel)
-            and channel.parent.name == FORUM_NAME
+            and channel.parent.name == CLASS_HALLS_FORUM
         )
-
-    @staticmethod
-    async def _find_post(forum: discord.ForumChannel) -> discord.Thread | None:
-        post = discord.utils.get(forum.threads, name=POST_NAME)
-        if post is not None:
-            return post
-        async for thread in forum.archived_threads(limit=None):
-            if thread.name == POST_NAME:
-                return thread
-        return None
 
     @tasks.loop(hours=SWEEP_INTERVAL_HOURS)
     async def _post_sweep(self) -> None:
         """Create the "Gear sims" post with :data:`USAGE` where it's missing, and reopen it if it was archived."""
         for guild in self.bot.guilds:
-            forum = discord.utils.get(guild.forums, name=FORUM_NAME)
+            forum = discord.utils.get(guild.forums, name=CLASS_HALLS_FORUM)
             if forum is None:
                 continue
             try:
-                post = await self._find_post(forum)
+                post = await find_post(forum, POST_NAME)
                 if post is None:
                     await forum.create_thread(name=POST_NAME, content=USAGE)
                 elif post.archived:

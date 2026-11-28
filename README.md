@@ -76,7 +76,8 @@ lives there.
   to its post and dropping the role takes you out. In each hall the bot posts and pins the guides the guild
   recommends for that class (Method and Mobalytics, one button per guide), and edits that post when the list changes.
   When Blizzard posts WoW: Forever hotfixes, each class's changes go to that class's hall as their own post, even if
-  no feed channel is set.
+  no feed channel is set. The bot also keeps a **Choose your class** post pinned at the top of `#class-halls`
+  (unpinning any other post, since a forum pins only one), and the class role menu lives in it.
 - **Addons.** `#addons`, right below `#rules`, lists the community addons the guild recommends for WoW: Forever,
   grouped by who they're for (required for raids, suggested for raids, everyone, leveling, PvP), with a link to the
   full catalog on the website. The bot creates the channel the first time it has addons to show, keeps it read-only
@@ -162,7 +163,7 @@ Server Settings, Integrations. Settings are saved in the API and apply at once.
 | `/logging channel`, `/logging status` | Manage Server | Where edits, deletes, joins, leaves, role changes and voice moves are logged. |
 | `/levels ...` | Manage Server | Level rewards, chat XP range, cooldown, level-up messages, and channels or roles that earn no XP (chat, voice, events or groups). |
 | `/stats backfill [days]` | Manage Server | Reads past message counts from channel history into server stats (default the last year). Safe to re-run. |
-| `/rolemenu ...` | Manage Roles | Button panels that let members pick their own roles. |
+| `/rolemenu ...` | Manage Roles | Button panels that let members pick their own roles. `/rolemenu move` reposts one in another channel or forum post. |
 | `/warn`, `/timeout`, `/untimeout` | Timeout Members | Each one DMs the member, opens a numbered case and logs it. |
 | `/kick` | Kick Members | As above. |
 | `/ban`, `/unban` | Ban Members | As above. |

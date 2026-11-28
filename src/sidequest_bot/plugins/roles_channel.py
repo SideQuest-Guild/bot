@@ -77,7 +77,8 @@ _AUTOMATIC_ROLE_ENTRIES: tuple[tuple[str, str], ...] = (
 )
 
 _CLASS_ROLES_LINE = (
-    "Class roles: pick yours in `#choose-your-class`, which also adds you to that class's post in `#class-halls`."
+    "Class roles: pick yours in the **Choose your class** post pinned in `#class-halls`, which also adds you to that "
+    "class's hall there."
 )
 
 _BADGES_NOTE = (

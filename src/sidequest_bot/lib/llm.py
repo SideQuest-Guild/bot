@@ -134,16 +134,17 @@ class ChatClient:
 
     async def _post(self, body: dict[str, Any]) -> httpx.Response:
         """POST ``body``, waiting and retrying when rate limited (429), up to ``RATE_LIMIT_RETRIES`` times."""
-        for attempt in range(RATE_LIMIT_RETRIES + 1):
+        retries_left = RATE_LIMIT_RETRIES
+        while True:
             try:
                 response = await self._http.post(self._url, json=body, headers=self._headers)
             except httpx.HTTPError as exc:
                 msg = f"model API unreachable: {exc}"
                 raise LLMError(msg) from exc
-            if response.status_code != httpx.codes.TOO_MANY_REQUESTS or attempt == RATE_LIMIT_RETRIES:
+            if response.status_code != httpx.codes.TOO_MANY_REQUESTS or retries_left == 0:
                 return response
+            retries_left -= 1
             await asyncio.sleep(_retry_after(response))
-        return response
 
     async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> Reply:
         """One model turn over ``messages``, offering ``tools`` if any."""

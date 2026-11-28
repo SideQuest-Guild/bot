@@ -70,6 +70,11 @@ lives there.
   Going, Maybe and Can't buttons, **More info** and **Thread** links, and who's going, maybe or can't. The cards keep
   up as people sign up. A week with no events gets no cards. A recruitment drive's card has no sign-up buttons or
   lists; it shows how many recruits are invited, joined and qualified instead.
+- **The market report.** Every day at 10:00 Central the bot posts what sells on the guild's auction house: for
+  each gathering profession (Herbalism, Mining, Skinning, Fishing, Cloth), the best material to farm for a low,
+  mid or high level character, what it sells for, how fast it sells, and where to get it; and for each crafting
+  profession, the top crafts worth making, with profit a craft after buying the materials. Links to the full
+  report and the week's numbers on the site. No report yet, or one too old to trust, skips that day.
 - **WoW: Forever news.** Every five minutes the bot checks Blizzard's own forum posts about WoW: Forever and
   Wowhead's WoW: Forever news, and posts each new one in the feed channel with a link to the full post.
 - **Class halls.** Each class has a post in `#class-halls`, named like `Warrior Hall`. Picking a class role adds you
@@ -151,6 +156,7 @@ Server Settings, Integrations. Settings are saved in the API and apply at once.
 | `/eventsync forum [channel]` | Manage Server | Picks the forum for event threads. |
 | `/lfg channel <channel>`, `/lfg pingrole <kind> [role]`, `/lfg pugrole [role]`, `/lfg status` | Manage Server | Picks the `#lfg` panel channel, sets a kind's opt-in ping role, sets the role PUG invites give, or shows live groups. `/lfg pugrole` lists the channels that role can still see; hide all but `#sign-the-ledger`. |
 | `/weeklyboard channel`, `/weeklyboard preview` | Manage Server | Picks the weekly board's channel, or shows you this week's board. |
+| `/marketreport channel`, `/marketreport preview` | Manage Server | Picks the market report's channel, or shows you today's report. |
 | `/badges channel`, `/badges sync` | Manage Server | Picks where badges are announced, or checks for new badges now. |
 | `/lootlog channel` | Manage Server | Picks where council loot decisions are posted. |
 | `/announcements channel` | Manage Server | Picks where announcements from the game and the website are posted. |

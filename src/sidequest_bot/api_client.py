@@ -49,6 +49,8 @@ from sidequest_common.schemas import (
     LeaderboardPage,
     LevelRoleSchema,
     LevelRoleUpsert,
+    MarketReport,
+    MarketReportKind,
     MemberLevelSchema,
     MemberLink,
     MemberListing,
@@ -1302,3 +1304,13 @@ class SideQuestAPI:
         """Poll one sim job's current status/result. Raises ``NotFoundError`` for an unknown job."""
         data = await self._request("GET", f"{self._guild(guild_id)}/sims/{job_id}")
         return _parse(SimJob.model_validate, data)
+
+    # --- Market report
+
+    async def get_market_report(self, guild_id: int, *, kind: MarketReportKind = "daily") -> MarketReport | None:
+        """The guild's current ``kind`` market report, or ``None`` before the first auction house feed (404)."""
+        try:
+            data = await self._request("GET", f"{self._guild(guild_id)}/market-report", params={"kind": kind})
+        except NotFoundError:
+            return None
+        return _parse(MarketReport.model_validate, data)
